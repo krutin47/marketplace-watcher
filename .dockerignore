@@ -1,0 +1,7 @@
+*
+!requirements.txt
+!watcher
+!watcher/**
+!web
+!web/**
+**/__pycache__

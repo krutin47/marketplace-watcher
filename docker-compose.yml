@@ -1,0 +1,28 @@
+services:
+  watcher:
+    build: .
+    ports:
+      - "127.0.0.1:${WATCHER_PORT:-8000}:8000"
+    environment:
+      WATCHER_DB: /data/watcher.sqlite3
+      WATCHER_ORIGIN: ${WATCHER_ORIGIN:-}
+      WATCHER_DASHBOARD_URL: ${WATCHER_DASHBOARD_URL:-}
+      WATCHER_ALLOWED_HOSTS: ${WATCHER_ALLOWED_HOSTS:-127.0.0.1,localhost}
+      INGESTION_SECRET: ${INGESTION_SECRET:-}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      SOURCE_SPACING_SECONDS: ${SOURCE_SPACING_SECONDS:-2}
+      WORKER_TIMEOUT_SECONDS: ${WORKER_TIMEOUT_SECONDS:-12}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+    volumes:
+      - watcher-data:/data
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health/ready', timeout=3).close()"]
+      interval: 10s
+      timeout: 4s
+      retries: 3
+    restart: unless-stopped
+volumes:
+  watcher-data:

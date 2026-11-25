@@ -1,0 +1,4 @@
+CREATE TABLE baselines (
+ watchlist_id INTEGER PRIMARY KEY REFERENCES watchlists(id) ON DELETE CASCADE
+);
+ALTER TABLE watchlists ADD COLUMN fixture_step INTEGER NOT NULL DEFAULT 0;
