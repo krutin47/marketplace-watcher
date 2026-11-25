@@ -224,6 +224,40 @@ class ApiTests(DatabaseCase, unittest.TestCase):
                                                   base_url="http://localhost"))
         self.headers = {"Authorization": "Bearer local-test"}
 
+    def test_run_results_include_unmatched_listings_without_duplicates(self):
+        watch = self.add_watch()
+        worker = self.client.app.state.worker
+        self.assertTrue(asyncio.run(worker.poll()))
+        baseline = self.client.get("/api/runs").json()[0]
+        self.assertEqual(baseline["result_count"], 1)
+        self.clock.now += 2
+        queued = self.client.post(f"/api/watchlists/{watch['id']}/run")
+        self.assertEqual(queued.status_code, 202)
+        self.assertEqual(queued.json()["status"], "queued")
+        self.assertTrue(asyncio.run(worker.poll()))
+        run = self.client.get("/api/runs").json()[0]
+        self.assertEqual(run["result_count"], 7)
+
+        query = {"run_id": run["id"], "limit": 3}
+        first = self.client.get("/api/listings", params=query).json()
+        self.assertEqual(first["total"], 7)
+        self.assertEqual(len(first["items"]), 3)
+        self.assertEqual(first["next_offset"], 3)
+        last = self.client.get("/api/listings", params=query | {"offset": 6}).json()
+        self.assertEqual(len(last["items"]), 1)
+        self.assertIsNone(last["next_offset"])
+        unmatched = self.client.get("/api/listings", params={"run_id": run["id"], "status": "unmatched"}).json()
+        self.assertIn("8GB HDD broken", [row["title"] for row in unmatched["items"]])
+        self.assertEqual(self.client.get("/api/overview").json()["total_listings"], 7)
+        self.assertEqual(self.client.get("/api/listings", params={"run_id": baseline["id"]}).json()["total"], 1)
+
+        with self.store.connect() as db:
+            old_run = db.execute("""INSERT INTO runs(watchlist_id,name,source,started,status)
+                                    VALUES(?,?,'fixture',?,'success')""",
+                                 (watch["id"], watch["name"], self.clock())).lastrowid
+        self.assertEqual(self.client.get("/api/listings", params={"run_id": old_run}).status_code, 409)
+        self.assertEqual(self.client.get("/api/listings").json()["total"], 7)
+
     def test_watchlist_routes_and_typed_errors(self):
         client = self.client
         config = {"name": "One", "max_price": 10}

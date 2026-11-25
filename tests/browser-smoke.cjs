@@ -10,6 +10,7 @@ const { chromium } = require("playwright");
   });
   try {
     const context = await browser.newContext({
+      baseURL: origin,
       viewport: { width: 390, height: 844 },
       permissions: ["clipboard-read", "clipboard-write"],
     });
@@ -30,7 +31,7 @@ const { chromium } = require("playwright");
     await page.getByRole("heading", { name: "Browser smoke" }).waitFor();
 
     await page.getByRole("button", { name: "Listings", exact: true }).click();
-    await page.getByText("No listings match these filters.").waitFor();
+    await page.getByText("No listings have been collected yet.").waitFor();
     await page.getByText("Import listing manually").click();
     await page.getByLabel("Listing URL").fill("https://example.com/smoke/hdd");
     await page.getByLabel("Title", { exact: true }).fill("8TB HDD browser smoke");
@@ -54,6 +55,33 @@ const { chromium } = require("playwright");
     await page.getByRole("button", { name: "View details" }).click();
     assert.equal(await draft.inputValue(), "Is this disk available?");
     assert.equal(await page.getByLabel("Listing state").inputValue(), "saved");
+    const createFixture = await page.request.post("/api/watchlists", {
+      data: { name: "Fixture disk", phrase: "8TB HDD", max_price: 50 },
+    });
+    assert.equal(createFixture.status(), 201);
+    const fixture = await createFixture.json();
+    async function waitForRun(count) {
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        const runs = await (await page.request.get("/api/runs")).json();
+        if (runs.some((run) => run.watchlist_id === fixture.id && run.result_count === count)) return;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.fail(`No fixture run returned ${count} listings`);
+    }
+    await waitForRun(1);
+    await page.getByRole("button", { name: "Watchlists", exact: true }).click();
+    await page.getByRole("button", { name: "Run now" }).click();
+    await page.getByText("Run queued.").waitFor();
+    await page.getByRole("button", { name: "Open Activity" }).click();
+    await waitForRun(7);
+    await page.getByRole("button", { name: "Refresh" }).click();
+    const completedRun = page.locator("article").filter({hasText: "7 listings returned"});
+    await completedRun.getByRole("button", { name: "View listings" }).click();
+    await page.getByText("Showing 1–7 of 7 listings", { exact: true }).waitFor();
+    await page.getByRole("heading", { name: "8GB HDD broken" }).waitFor();
+    await page.getByRole("button", { name: "View all listings" }).click();
+    await page.getByText("Showing 1–8 of 8 listings", { exact: true }).waitFor();
+    await page.getByRole("heading", { name: "8TB HDD browser smoke" }).waitFor();
     await page.getByRole("button", { name: "Settings" }).click();
     await page.getByRole("button", { name: "Send test notification" }).click();
     await page.getByText("Test notification queued.").waitFor();
@@ -64,7 +92,7 @@ const { chromium } = require("playwright");
     await page.getByRole("button", { name: "Retry" }).click();
     await page.getByRole("heading", { name: "Deal overview" }).waitFor();
     assert.deepEqual(errors, []);
-    console.log("PASS Chromium mobile smoke: empty and retry states, watchlist, import, draft, clipboard, state, and test delivery");
+    console.log("PASS Chromium mobile smoke: run results, all listings, import, drafts, state, and test delivery");
   } finally {
     await browser.close();
   }

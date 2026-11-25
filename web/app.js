@@ -61,14 +61,15 @@ const section = (title, children, fallback) => node("section", {}, node("h2", {}
 
 async function overview() {
   const [summary, sources, ready] = await Promise.all([api("/api/overview"), api("/api/sources"), api("/health/ready")]);
-  const metrics = [["Enabled watchlists", summary.enabled], ["Confirmed listings", summary.confirmed],
+  const metrics = [["All stored listings", summary.total_listings], ["Enabled watchlists", summary.enabled], ["Confirmed listings", summary.confirmed],
     ["Last successful poll", timestamp(summary.last_sync)], ["Failed runs retained", summary.failed]];
-  return [heading("Deal overview", "Track offers across your watchlists and review new matches.",
+  return [heading("Deal overview", "Scheduled polls use simulated listings. Add real listings by manual import or forwarded alert.",
+    button("View all listings", () => openListings(), "primary"),
     button("Refresh", () => show("overview")), button("Add demo watchlists", () => action(async () => {
       const result = await api("/api/demo", "POST");
       await show("watchlists");
       feedback.textContent = result.length ? "Demo watchlists added. Fixture data is simulated." : "Demo watchlists already exist.";
-    }), "primary")),
+    }))),
     node("div", {className:"grid"}, metrics.map(([label, value]) => node("div", {className:"card stat"}, node("small", {}, label), node("strong", {}, value)))),
     section("Sources and system health", [node("div", {className:"card"}, chip(`Database ${ready.status}`),
       sources.map((source) => node("div", {}, node("strong", {}, sourceName(source.id)), " ",
@@ -120,14 +121,23 @@ async function watchlists() {
       node("details", {}, node("summary", {}, "Edit watchlist"), editor(item)),
       node("div", {className:"actions"},
         item.enabled && item.sources.includes("fixture") ? button("Run now", () => action(async () => {
-          const result = await api(`/api/watchlists/${item.id}/run`, "POST"); feedback.textContent = `Run ${result.status}. See Activity for results.`;
+          const result = await api(`/api/watchlists/${item.id}/run`, "POST");
+          feedback.replaceChildren(`Run ${result.status}. `, button("Open Activity", () => show("activity")));
         })) : null,
         button("Delete", () => action(async () => {
           if (!confirm(`Delete watchlist “${item.name}”?`)) return;
           await api(`/api/watchlists/${item.id}`, "DELETE"); await show("watchlists");
         })))))];
 }
-const feedFilters = {source:"", status:"", state:"", sort:"recent", watchlist_id:"", offset:0};
+const defaultFeedFilters = {source:"", status:"", state:"", sort:"recent", watchlist_id:"", offset:0};
+const feedFilters = {...defaultFeedFilters};
+let selectedRun = null;
+
+function openListings(run = null) {
+  selectedRun = run;
+  Object.assign(feedFilters, defaultFeedFilters);
+  return show("listings");
+}
 
 function importForm() {
   return form([
@@ -142,13 +152,23 @@ function importForm() {
     if (body.listed_at) body.listed_at = new Date(body.listed_at).toISOString();
     if (body.currency) body.currency = body.currency.toUpperCase();
     const result = await api("/api/ingestion/manual", "POST", body);
+    selectedRun = null;
+    Object.assign(feedFilters, defaultFeedFilters);
     await detail(result.listing_ids[0]);
     feedback.textContent = "Listing imported.";
   });
 }
 async function listings() {
+  const run = selectedRun;
+  const offset = feedFilters.offset;
   const query = new URLSearchParams(Object.entries(feedFilters).filter(([, value]) => value !== ""));
+  if (run) query.set("run_id", run.id);
   const [data, watches] = await Promise.all([api("/api/listings?" + query), api("/api/watchlists")]);
+  const filtered = Boolean(feedFilters.source || feedFilters.status || feedFilters.state || feedFilters.watchlist_id);
+  const description = run ? `${run.name} · ${sourceName(run.source)} · ${timestamp(run.started)}. Prices and match labels reflect the latest stored details.`
+    : "All stored listings, including unmatched and dismissed items.";
+  const emptyMessage = filtered ? "No listings match these filters." : run ? "This run returned no listings."
+    : "No listings have been collected yet. Run a fixture watchlist or import a listing below.";
   const filters = node("div", {className:"filters", onchange:(event) => {
     feedFilters[event.target.name] = event.target.value; feedFilters.offset = 0; void show("listings");
   }},
@@ -157,13 +177,17 @@ async function listings() {
     select("state","State",[["","All"],...states.map((s) => [s,s])],feedFilters.state),
     select("watchlist_id","Watchlist",[["","All"],...watches.map((watch) => [watch.id,watch.name])],feedFilters.watchlist_id),
     select("sort","Sort",[["recent","Recent"],["price","Lowest price"],["score","Highest score"]],feedFilters.sort));
-  return [heading("Listings", "Review match reasons, price revisions, and seller message drafts.", button("Refresh", () => show("listings"))),
-    node("details", {}, node("summary", {}, "Import listing manually"), importForm()), filters,
+  return [heading(run ? "Run listings" : "Listings", description, button("Refresh", () => show("listings")),
+    run ? button("View all listings", () => openListings()) : null,
+    run ? button("Back to Activity", () => show("activity")) : null),
+    run ? null : node("details", {}, node("summary", {}, "Import listing manually"), importForm()), filters,
+    filtered ? button("Clear filters", () => openListings(run)) : null,
+    node("p", {role:"status"}, data.items.length ? `Showing ${offset + 1}–${offset + data.items.length} of ${data.total} listings` : `${data.total} listings`),
     ...(data.items.length ? data.items.map((item) => node("article", {className:"row"},
       node("div", {}, node("h3", {}, item.title || "Untitled listing"), node("p", {}, `${money(item)} · ${item.location || "Location unknown"}`),
         chip(sourceName(item.source)), chip(item.state),
-        item.matches.map((m) => chip(`${m.watchlist} · ${m.status} · ${m.score}`, m.status === "uncertain"))),
-      button("View details", () => action(() => detail(item.id))))) : [empty("No listings match these filters.")]),
+        item.matches.length ? item.matches.map((m) => chip(`${m.watchlist} · ${m.status} · ${m.score}`, m.status === "uncertain")) : chip("Unmatched")),
+      button("View details", () => action(() => detail(item.id))))) : [empty(emptyMessage)]),
     node("div", {className:"actions"}, feedFilters.offset ? button("Previous page", () => { feedFilters.offset = Math.max(0, feedFilters.offset - 30); void show("listings"); }) : null,
       data.next_offset != null ? button("Next page", () => { feedFilters.offset = data.next_offset; void show("listings"); }) : null)];
 }
@@ -181,7 +205,8 @@ async function detail(id) {
       await navigator.clipboard.writeText(draftForm.elements.message.value); feedback.textContent = "Draft copied.";
     })));
   view.replaceChildren(heading(item.title || "Untitled listing", `${sourceName(item.source)} · ${money(item)}`,
-    button("Back to listings", () => show("listings")), link(item.url)),
+    button(selectedRun ? "Back to run listings" : "Back to listings", () => show("listings")),
+    item.source === "fixture" ? null : link(item.url)),
     node("div", {className:"card"}, node("p", {}, item.description || "Description unknown"),
       node("p", {}, `Location · ${item.location || "Unknown"} | Condition · ${item.condition || "Unknown"}`),
       node("p", {}, `Distance · ${item.distance_km == null ? "Unknown" : item.distance_km + " km from " + (item.distance_from || "unknown origin")}`),
@@ -193,7 +218,10 @@ async function detail(id) {
       node("p", {}, Object.entries(m.breakdown).map(([key, points]) => `${key} ${points}`).join(" · ")))), "No watchlist match."),
     section("Price and revision history", history.map((entry) => node("div", {className:"row"},
       node("strong", {}, money(entry)), entry.title || "Untitled", timestamp(entry.observed))), "No retained revisions."),
-    node("h2", {}, "Seller message"), draftForm);
+    node("h2", {}, "Seller message"),
+    node("p", {}, item.source === "fixture" ? "You can try the draft tools on this simulated listing."
+      : "Copy the draft, open the listing, and send it yourself on the marketplace."),
+    draftForm);
   view.querySelector('[name="state"]').addEventListener("change", (event) => action(async () => {
     await api(base + "/state", "PATCH", {state:event.target.value}); feedback.textContent = "Listing state saved.";
   }));
@@ -202,14 +230,19 @@ async function detail(id) {
 }
 async function activity() {
   const runs = await api("/api/runs");
-  return [heading("Run activity", "Review poll results and provider failures.", button("Refresh", () => show("activity"))),
+  return [heading("Run activity", "Open a completed run to see every distinct listing it returned.", button("Refresh", () => show("activity"))),
     ...(runs.length ? runs.map((run) => node("article", {className:"row"}, node("div", {},
       node("h3", {}, run.name), node("p", {}, `${sourceName(run.source)} · ${timestamp(run.started)}`),
-      run.error ? node("p", {className:"error"}, run.error) : null), chip(run.status, run.status !== "success"))) : [empty("No runs have been recorded.")])];
+      run.result_count != null ? node("p", {}, `${run.result_count} ${run.result_count === 1 ? "listing" : "listings"} returned`)
+        : run.status === "success" ? node("p", {}, "Listing results were not recorded for this older run.") : null,
+      run.error ? node("p", {className:"error"}, run.error) : null),
+    node("div", {className:"actions"}, chip(run.status, run.status !== "success"),
+      run.result_count != null ? button("View listings", () => openListings(run)) : null))) : [empty("No runs have been recorded.")])];
 }
 async function settings() {
   const {settings:config, delivery, provider} = await api("/api/notifications");
-  return [heading("Notifications", `Delivery provider · ${provider}`, button("Refresh", () => show("settings")),
+  const destination = provider === "telegram" ? "Telegram sends alerts only to your configured chat." : "Console alerts appear in the application logs.";
+  return [heading("Notifications", destination, button("Refresh", () => show("settings")),
     button("Send test notification", () => action(async () => {
       await api("/api/notifications/test", "POST"); await show("settings"); feedback.textContent = "Test notification queued.";
     }), "primary")),
@@ -241,7 +274,9 @@ async function show(name) {
     if (renderId === generation) view.replaceChildren(node("div", {className:"card"}, node("p", {className:"error"}, error.message), button("Retry", () => show(name))));
   }
 }
-for (const tab of document.querySelectorAll("[data-view]")) tab.addEventListener("click", () => show(tab.dataset.view));
+for (const tab of document.querySelectorAll("[data-view]")) {
+  tab.addEventListener("click", () => tab.dataset.view === "listings" ? openListings() : show(tab.dataset.view));
+}
 const linkedListing = new URLSearchParams(location.search).get("listing");
 if (linkedListing && /^[1-9][0-9]*$/.test(linkedListing)) {
   const listingTab = document.querySelector('[data-view="listings"]');

@@ -202,6 +202,7 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
         source: Source | None = None,
         status: Literal["confirmed", "uncertain", "unmatched"] | None = None,
         watchlist_id: int | None = None,
+        run_id: int | None = Query(None, ge=1),
         sort: Literal["recent", "price", "score"] = "recent",
     ):
         filters, args = [], []
@@ -217,6 +218,9 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
         if watchlist_id is not None:
             filters.append("EXISTS (SELECT 1 FROM matches m WHERE m.listing_id=l.id AND m.watchlist_id=?)")
             args.append(watchlist_id)
+        if run_id is not None:
+            filters.append("l.id IN (SELECT listing_id FROM run_listings WHERE run_id=?)")
+            args.append(run_id)
         order = {
             "recent": "l.last_seen DESC",
             "price": "json_extract(l.data,'$.price') IS NULL, CAST(json_extract(l.data,'$.price') AS REAL)",
@@ -224,10 +228,13 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
         }[sort]
         where = " WHERE " + " AND ".join(filters) if filters else ""
         with store.connect() as db:
+            if run_id is not None and require(db, "runs", run_id)["result_count"] is None:
+                raise HTTPException(409, "This run has no recorded listing results")
+            total = db.execute(f"SELECT COUNT(*) FROM listings l{where}", args).fetchone()[0]
             rows = db.execute(f"SELECT l.* FROM listings l{where} ORDER BY {order},l.id DESC LIMIT ? OFFSET ?",
-                              (*args, limit + 1, offset)).fetchall()
-            return {"items": [store.listing(db, row) for row in rows[:limit]],
-                    "next_offset": offset + limit if len(rows) > limit else None}
+                              (*args, limit, offset)).fetchall()
+            return {"items": [store.listing(db, row) for row in rows], "total": total,
+                    "next_offset": offset + limit if offset + limit < total else None}
 
     @app.get("/api/listings/{identifier}")
     async def listing(identifier: int):
@@ -329,6 +336,7 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
         with store.connect() as db:
             return dict(db.execute("""SELECT
                 (SELECT COUNT(*) FROM watchlists WHERE enabled=1) enabled,
+                (SELECT COUNT(*) FROM listings) total_listings,
                 (SELECT COUNT(DISTINCT listing_id) FROM matches WHERE status='confirmed') confirmed,
                 (SELECT MAX(last_success) FROM watchlists) last_sync,
                 (SELECT COUNT(*) FROM runs WHERE status='failed') failed""").fetchone())

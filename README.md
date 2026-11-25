@@ -24,6 +24,13 @@ Native development uses `data/watcher.sqlite3` unless overridden by `WATCHER_DB`
 
 If a local TLS inspection proxy supplies a CA that the container image lacks, provide a Compose build secret named `pip_ca` through a build override, targeting a trusted CA bundle. The Dockerfile uses it only for package installation.
 
+## View listings and contact sellers
+
+- **Overview → View all listings** shows all stored listings, including unmatched and dismissed listings. Clear filters to return to the full set.
+- **Watchlists → Run now → Open Activity** takes you to poll history. Refresh Activity after the run completes, then choose **View listings** beside its result count. The run view includes every distinct listing returned and shows its latest stored details. Older runs have no per-run listing history, but their stored listings remain in the main feed.
+- Scheduled polls use simulated listings. To add real listings, use **Listings → Import listing manually** or the authenticated forwarding API.
+- Open a real listing's details, generate or edit the seller draft, and choose **Copy draft**. Use **Open listing** to paste and send it yourself on the marketplace. Optional Telegram alerts go to your configured Telegram chat.
+
 ## Demo
 
 On a fresh database, open **Overview → Add demo watchlists**. The examples are editable and use simulated fixtures. For an isolated demonstration, create only an **8TB HDD** fixture watchlist with phrase `8TB HDD`, maximum `50 CAD`, and the default location. Wait until Activity shows its first successful run, then use **Run now** twice, waiting for each successful run to finish. The default polling interval is five minutes, and manual runs share the same source limits.
@@ -46,7 +53,7 @@ Notifications and matches are keyed by source and external ID, with the normaliz
 
 ## API
 
-OpenAPI is available at `/openapi.json` and the interactive API documentation at `/docs`. The dashboard exposes watchlist CRUD, run enqueueing, source capabilities, listing filters and revisions, notification configuration, and delivery history. `/health/live` reports the process, `/health/ready` checks the database, and Overview and Activity report the last successful poll and failures.
+OpenAPI is available at `/openapi.json` and the interactive API documentation at `/docs`. The dashboard exposes watchlist CRUD, run enqueueing, source capabilities, listing filters and revisions, notification configuration, and delivery history. `GET /api/listings` returns the total after filtering and accepts an optional `run_id` from `GET /api/runs`. `/health/live` reports the process, `/health/ready` checks the database, and Overview and Activity report the last successful poll and failures.
 
 ```sh
 curl -fsS http://127.0.0.1:8000/api/watchlists \

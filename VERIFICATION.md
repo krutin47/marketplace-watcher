@@ -16,3 +16,9 @@
 The test runner emitted a Starlette warning about future migration from HTTPX in TestClient. All tests passed. Scheduler tests advance injected time to cover the five-minute interval without a five-minute wall-clock wait. The running service exercised a scheduled initial poll and two manual reruns.
 
 Live Telegram delivery, a live marketplace connector, a complete accessibility audit, and performance measurements remain unverified. Proxmox deployment was outside the local milestone.
+
+## Listing visibility update
+
+- All 13 Python tests passed. The new integration test verifies that a queued fixture run stores all distinct results and that pagination and match filters preserve accurate counts.
+- The Chromium smoke test verified that Activity opens all seven distinct fixture results, including the unmatched drive, and that the main feed also includes the manually imported listing.
+- Migrating a prior SQLite snapshot preserved existing listings, watchlists, runs, and outbox records. Earlier runs correctly show that per-run listing results are unavailable.

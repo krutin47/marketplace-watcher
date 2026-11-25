@@ -84,13 +84,18 @@ class Worker:
                 else:
                     with self.store.connect() as db:
                         active = db.execute("SELECT enabled,config FROM watchlists WHERE id=?", (watch_id,)).fetchone()
-                        if active and active["enabled"] and active["config"] == row["config"]:
-                            self.store.ingest(db, candidates, self.clock(), baseline_id=watch_id)
+                        accepted = active and active["enabled"] and active["config"] == row["config"]
+                        if accepted:
+                            now = self.clock()
+                            result = self.store.ingest(db, candidates, now, baseline_id=watch_id)
+                            listing_ids = result["listing_ids"]
+                            db.executemany("INSERT INTO run_listings VALUES(?,?)",
+                                           [(run_id, listing_id) for listing_id in listing_ids])
+                            db.execute("UPDATE runs SET result_count=?,status='success',finished=? WHERE id=?",
+                                       (len(listing_ids), now, run_id))
                             db.execute("UPDATE watchlists SET fixture_step=fixture_step+1 WHERE id=?", (watch_id,))
                             db.execute("UPDATE fixture_feed SET stage=? WHERE id=1", (stage,))
-                            status = "success"
-                        else:
-                            status = "cancelled"
+                    status = "success" if accepted else "cancelled"
                     break
                 error = str(failure)
                 retry_after = max(0, failure.retry_after)
