@@ -219,7 +219,7 @@ async function detail(id) {
     node("h2", {}, "Seller message"),
     node("p", {}, item.source === "fixture" ? "You can try the draft tools on this simulated listing."
       : "Copy the draft, open the listing, and send it yourself on the marketplace."),
-    draftForm, await evidencePanel(item, renderId));
+    draftForm, await evidencePanel(item, renderId), await listingProjects(item));
   if (renderId !== generation) return;
   const chat = await chatPanel(item, renderId);
   if (renderId !== generation) return;
@@ -281,8 +281,17 @@ async function evidencePanel(item) {
 
 async function chatPanel(item) {
   const pane = node("div", {id:"pane-chat", className:"pane chat", role:"tabpanel", "aria-labelledby":"tab-chat"});
-  let [usage, conversations, evidence] = await Promise.all([api("/api/assistant/usage"),
-    api(`/api/conversations?listing_id=${item.id}`), api(`/api/listings/${item.id}/evidence?limit=100`)]);
+  let [usage, conversations, evidence, projectList] = await Promise.all([api("/api/assistant/usage"),
+    api(`/api/conversations?listing_id=${item.id}`), api(`/api/listings/${item.id}/evidence?limit=100`), api("/api/projects?status=active")]);
+  const projectPicker = node("select", {"aria-label":"Project context"},
+    node("option", {value:""}, "No project"), ...projectList.map((p) => node("option", {value:p.id}, p.name)));
+  projectPicker.addEventListener("change", () => action(async () => {
+    const projectId = projectPicker.value ? Number(projectPicker.value) : null;
+    if (current) {
+      current = await api(`/api/conversations/${current.id}`, "PATCH", {version:current.version, project_id:projectId});
+      feedback.textContent = projectId ? "Project context changed. The next message uses only this project." : "Project context removed.";
+    }
+  }));
   let current = conversations[0] || null;
   let stream = null;
   let activeRun = null;
@@ -404,9 +413,12 @@ async function chatPanel(item) {
       })) : null);
   }
   function renderContext() {
+    projectPicker.value = current?.project_id ? String(current.project_id) : projectPicker.value;
     const excluded = new Set(current?.excluded ?? []);
     const options = [["listing:description", "Listing description", item.description != null],
       ...evidence.items.map((e) => [`evidence:${e.id}`, `${evidenceLabel(e.kind)} · ${e.content.slice(0, 60)}`, true]),
+      ["project", "Selected project, its requirements, budget and allocated equipment", true],
+      ["memory", "Your approved memory facts", true],
       ["history", "Earlier messages in this conversation", true]].filter(([, , present]) => present);
     contextBox.replaceChildren(
       node("p", {}, `Always attached: ${item.source === "fixture" ? "simulated " : ""}listing title, price, condition, location and timestamps from the latest stored revision.`),
@@ -429,13 +441,13 @@ async function chatPanel(item) {
     send.disabled = true;
     void action(async () => {
       if (!current) {
-        current = await api("/api/conversations", "POST", {listing_id:item.id});
+        current = await api("/api/conversations", "POST", {listing_id:item.id, project_id:projectPicker.value ? Number(projectPicker.value) : null});
         renderPicker(await api(`/api/conversations?listing_id=${item.id}`));
         renderHeader(); renderContext();
         log.replaceChildren();
       }
       const key = requestKey();
-      const result = await api(`/api/conversations/${current.id}/messages`, "POST", {content, request_key:key, listing_id:item.id});
+      const result = await api(`/api/conversations/${current.id}/messages`, "POST", {content, request_key:key, listing_id:item.id, project_id:current.project_id ?? null});
       memorySet(draftKey(), "");
       compose.value = "";
       log.querySelector(":scope > .card")?.remove();
@@ -458,12 +470,226 @@ async function chatPanel(item) {
   pane.append(node("h2", {}, "Chat about this listing"),
     usage.enabled ? node("p", {}, chip(usage.provider.label), usage.provider.cloud ? chip("Cloud: data leaves this computer", true) : chip("Runs locally"))
       : node("p", {className:"error"}, "The assistant is disabled. Listing details, notes and seller drafts still work."),
-    node("div", {className:"actions"}, node("label", {}, "Conversation", picker), header),
+    node("div", {className:"actions"}, node("label", {}, "Conversation", picker), node("label", {}, "Project context", projectPicker), header),
     node("details", {className:"context"}, node("summary", {}, "Context sent with each message"), contextBox),
     log, status, composer,
     node("small", {}, "The assistant cannot contact sellers, make offers or change records. Ctrl+Enter sends."));
   await loadMessages();
   return pane;
+}
+const amount = (value, currency) => value == null ? "Not set" : `${value} ${currency}`;
+const optionalText = (data, key) => data.get(key)?.trim() || null;
+const projectStatuses = ["active", "paused", "completed", "archived"];
+const roles = ["candidate", "shortlisted", "rejected", "purchased"];
+
+function budgetCard(summary) {
+  return node("div", {className:"grid"},
+    ...[["Budget", amount(summary.budget, summary.currency)], ["Confirmed purchases", amount(summary.actual, summary.currency)],
+      ["Committed offers", summary.committed == null ? "Not tracked yet" : amount(summary.committed, summary.currency)],
+      ["Remaining", amount(summary.remaining, summary.currency)]]
+      .map(([label, value]) => node("div", {className:"card stat"}, node("small", {}, label), node("strong", {}, value))),
+    summary.unconverted.length ? node("p", {}, "Not converted: " + summary.unconverted.map((u) => `${u.amount} ${u.currency}`).join(", ")) : null);
+}
+async function projects() {
+  const items = await api("/api/projects");
+  return [heading("Projects", "Purchasing goals with requirements, budgets and owned equipment.", button("Refresh", () => show("projects"))),
+    node("details", {open:!items.length}, node("summary", {}, "Create a project"), form([
+      input("name", "Name", "", {required:true, maxlength:"160"}), input("description", "Goal", "", {multiline:true, maxlength:"4000"}),
+      input("budget", "Budget (optional)", "", {type:"number", min:"0", step:".01"}), input("currency", "Currency", "CAD", {required:true}),
+      input("target_date", "Target date (optional)", "", {type:"date"})
+    ], "Create project", async (data) => {
+      const created = await api("/api/projects", "POST", {name:data.get("name"), description:data.get("description"),
+        budget:optionalText(data, "budget"), currency:data.get("currency").trim().toUpperCase(), target_date:optionalText(data, "target_date")});
+      await projectDetail(created.id); feedback.textContent = "Project created.";
+    })),
+    ...(items.length ? items.map((p) => node("article", {className:"row"}, node("div", {},
+      node("h3", {}, p.name), chip(p.status, p.status !== "active"),
+      node("p", {}, `Budget ${amount(p.budget_summary.budget, p.currency)} · remaining ${amount(p.budget_summary.remaining, p.currency)}`)),
+      button("Open project", () => action(() => projectDetail(p.id))))) : [empty("No projects yet. Examples: Home Media Server, Local AI Server.")])];
+}
+function requirementRow(r = {}) {
+  const row = node("fieldset", {className:"requirement"}, node("legend", {}, "Requirement"),
+    input("label", "Label", r.label ?? "", {required:true}), input("attribute", "Attribute", r.attribute ?? "", {required:true}),
+    select("operator", "Operator", [">=","<=","=","!=","contains","present"].map((o) => [o, o]), r.operator ?? ">="),
+    input("value", "Value", r.value ?? ""), input("unit", "Unit", r.unit ?? ""),
+    select("hardness", "Type", [["hard","Hard (must pass)"],["soft","Preference (weighted)"]], r.hardness ?? "hard"),
+    input("weight", "Weight (preferences only)", r.weight ?? 0, {type:"number", min:"0", max:"100"}),
+    input("evidence_required", "Needs evidence", r.evidence_required, {type:"checkbox"}));
+  row.append(button("Remove requirement", () => row.remove()));
+  return row;
+}
+async function projectDetail(id) {
+  const renderId = ++generation;
+  const [p, inventory, allListings] = await Promise.all([api(`/api/projects/${id}`), api("/api/inventory"), api("/api/listings?limit=100")]);
+  if (renderId !== generation) return;
+  const reload = async (message) => { await projectDetail(id); if (message) feedback.textContent = message; };
+  const edit = form([
+    input("name", "Name", p.name, {required:true, maxlength:"160"}), input("description", "Goal", p.description, {multiline:true}),
+    select("status", "Status", projectStatuses.map((s) => [s, s]), p.status), input("target_date", "Target date", p.target_date ?? "", {type:"date"}),
+    p.budget == null ? input("budget", "Budget (first time only)", "", {type:"number", min:"0", step:".01"}) : null,
+    input("notes", "Notes", p.notes, {multiline:true})
+  ], "Save project", async (data) => {
+    const body = {version:p.version, name:data.get("name"), description:data.get("description"), status:data.get("status"),
+      target_date:optionalText(data, "target_date"), notes:data.get("notes")};
+    if (p.budget == null && optionalText(data, "budget")) body.budget = optionalText(data, "budget");
+    await api(`/api/projects/${id}`, "PATCH", body); await reload("Project saved.");
+  });
+  const budget = p.budget == null ? null : node("details", {}, node("summary", {}, "Change budget (reason required)"), form([
+    input("budget", "New budget (empty removes it)", p.budget, {type:"number", min:"0", step:".01"}),
+    input("reason", "Reason", "", {required:true, minlength:"3", maxlength:"500"})
+  ], "Change budget", async (data) => {
+    await api(`/api/projects/${id}/budget`, "POST", {version:p.version, budget:optionalText(data, "budget"), reason:data.get("reason")});
+    await reload("Budget changed and recorded.");
+  }));
+  const rows = node("div", {}, ...p.requirements.map(requirementRow));
+  const requirementsForm = node("form", {onsubmit:(event) => {
+    event.preventDefault();
+    void action(async () => {
+      const requirements = [...rows.querySelectorAll("fieldset")].map((set) => {
+        const value = (name) => set.querySelector(`[name=${name}]`);
+        return {label:value("label").value, attribute:value("attribute").value, operator:value("operator").value,
+          value:value("value").value.trim() || null, unit:value("unit").value.trim() || null, hardness:value("hardness").value,
+          weight:value("hardness").value === "soft" ? Number(value("weight").value) : 0, evidence_required:value("evidence_required").checked};
+      });
+      await api(`/api/projects/${id}/requirements`, "PUT", {version:p.version, requirements}); await reload("Requirements saved.");
+    });
+  }}, rows, node("div", {className:"actions"}, button("Add requirement", () => rows.append(requirementRow())),
+    node("button", {className:"primary"}, "Save requirements")));
+  const linkable = allListings.items.filter((l) => !p.listings.some((x) => x.listing_id === l.id));
+  view.replaceChildren(heading(p.name, `${p.status} project${p.target_date ? " · target " + p.target_date : ""}`,
+      button("Back to projects", () => show("projects"))),
+    p.description ? node("p", {className:"prewrap"}, p.description) : null,
+    budgetCard(p.budget_summary), budget,
+    node("details", {}, node("summary", {}, "Edit project"), edit),
+    section("Requirements", [node("p", {}, "Hard requirements are pass/fail and cannot be outweighed by price. Preferences carry weights up to 100 in total."), requirementsForm], ""),
+    section("Listings", [
+      ...p.listings.map((l) => node("article", {className:"row"}, node("div", {}, node("h3", {}, l.title || "Untitled listing"),
+        node("p", {}, l.price == null ? "Price unknown" : `${l.price} ${l.currency || ""}`), l.source === "fixture" ? chip("Simulated") : null),
+        node("div", {className:"actions"}, (() => {
+          const control = select("role", "Role", roles.map((r) => [r, r]), l.role);
+          control.querySelector("select").addEventListener("change", (event) => action(async () => {
+            await api(`/api/projects/${id}/listings/${l.listing_id}`, "PATCH", {role:event.target.value}); feedback.textContent = "Role saved.";
+          }));
+          return control;
+        })(), button("Open listing", () => action(() => detail(l.listing_id))),
+        button("Unlink", () => action(async () => { await api(`/api/projects/${id}/listings/${l.listing_id}`, "DELETE"); await reload("Listing unlinked."); }))))),
+      linkable.length ? form([select("listing_id", "Add a stored listing", linkable.map((l) => [l.id, `${l.title || "Untitled"} · ${money(l)}`]), linkable[0].id),
+        select("role", "Role", roles.slice(0, 3).map((r) => [r, r]), "candidate")], "Link listing", async (data) => {
+        await api(`/api/projects/${id}/listings`, "POST", {listing_id:Number(data.get("listing_id")), role:data.get("role")}); await reload("Listing linked.");
+      }) : null], "No listings linked."),
+    section("Owned equipment for this project", [
+      ...p.allocations.map((a) => node("div", {className:"row"}, node("div", {}, node("strong", {}, `${a.allocated} × ${a.name}`),
+        node("p", {}, [a.manufacturer, a.model].filter(Boolean).join(" ") || a.category), a.override_reason ? chip(`Override: ${a.override_reason}`, true) : null),
+        button("Release", () => action(async () => { await api(`/api/projects/${id}/allocations/${a.id}`, "DELETE"); await reload("Allocation released."); })))),
+      inventory.length ? form([select("item", "Item", inventory.map((i) => [i.id, `${i.name} (${i.quantity - i.allocated} of ${i.quantity} unallocated)`]), inventory[0].id),
+        input("quantity", "Quantity", 1, {type:"number", min:"1", required:true}), input("override_reason", "Override reason (only to exceed available)")],
+      "Allocate", async (data) => {
+        const body = {quantity:Number(data.get("quantity"))};
+        if (optionalText(data, "override_reason")) body.override_reason = optionalText(data, "override_reason");
+        await api(`/api/projects/${id}/allocations/${data.get("item")}`, "PUT", body); await reload("Allocated.");
+      }) : empty("Add owned equipment under Inventory to allocate it.")], ""),
+    section("Purchases", [...p.purchases.map((x) => node("div", {className:"row"}, node("strong", {}, `${x.amount} ${x.currency}`), x.description, timestamp(x.purchased_at))),
+      node("details", {}, node("summary", {}, "Record a completed purchase"), form([
+        input("description", "What you bought", "", {required:true}), input("amount", "Amount paid", "", {type:"number", min:"0", step:".01", required:true}),
+        input("currency", "Currency", p.currency, {required:true}), input("purchased_at", "When", "", {type:"datetime-local", required:true}),
+        select("listing_id", "From listing (optional)", [["", "None"], ...p.listings.map((l) => [l.listing_id, l.title || "Untitled"])], ""),
+        input("confirm", "I confirm I completed this purchase myself", false, {type:"checkbox", required:true})
+      ], "Record purchase", async (data) => {
+        await api("/api/purchases", "POST", {confirm:data.has("confirm"), description:data.get("description"), amount:data.get("amount"),
+          currency:data.get("currency").trim().toUpperCase(), purchased_at:new Date(data.get("purchased_at")).toISOString(), project_id:id,
+          listing_id:data.get("listing_id") ? Number(data.get("listing_id")) : null});
+        await reload("Purchase recorded. Add it to Inventory yourself if you want to track it as owned.");
+      }))], ""),
+    p.budget_changes.length ? section("Budget history", p.budget_changes.map((c) => node("p", {}, `${timestamp(c.created)} · ${c.previous ?? "none"} → ${c.new ?? "none"} · ${c.reason}`)), "") : null);
+  view.querySelector("h1").setAttribute("tabindex", "-1");
+  view.querySelector("h1").focus();
+}
+function inventoryForm(item = {}) {
+  const attributes = Object.entries(item.attributes ?? {}).map(([k, v]) => `${k}=${v}`).join("\n");
+  return form([
+    input("name", "Name", item.name ?? "", {required:true}), input("category", "Category", item.category ?? "", {required:true}),
+    input("manufacturer", "Manufacturer", item.manufacturer ?? ""), input("model", "Exact model", item.model ?? ""),
+    input("quantity", "Quantity", item.quantity ?? 1, {type:"number", min:"0", required:true}), input("condition", "Condition", item.condition ?? ""),
+    select("lifecycle", "Lifecycle", [["in_use","In use"],["spare","Spare"],["retired","Retired"],["sold","Sold"]], item.lifecycle ?? "in_use"),
+    input("acquisition_cost", "Cost (optional)", item.acquisition_cost ?? "", {type:"number", min:"0", step:".01"}),
+    input("acquisition_currency", "Cost currency", item.acquisition_currency ?? ""),
+    item.id ? null : input("serial", "Serial number (private, optional)"),
+    input("attributes", "Specifications (one key=value per line)", attributes, {multiline:true}), input("notes", "Notes", item.notes ?? "", {multiline:true})
+  ], item.id ? "Save item" : "Add item", async (data) => {
+    const specs = {};
+    for (const line of data.get("attributes").split("\n").map((l) => l.trim()).filter(Boolean)) {
+      const [key, ...rest] = line.split("=");
+      if (!rest.length) throw new Error(`Specification line needs key=value: ${line}`);
+      specs[key.trim()] = rest.join("=").trim();
+    }
+    const body = {name:data.get("name"), category:data.get("category"), manufacturer:optionalText(data, "manufacturer"),
+      model:optionalText(data, "model"), quantity:Number(data.get("quantity")), condition:optionalText(data, "condition"),
+      lifecycle:data.get("lifecycle"), acquisition_cost:optionalText(data, "acquisition_cost"),
+      acquisition_currency:optionalText(data, "acquisition_currency")?.toUpperCase() ?? null, attributes:specs, notes:data.get("notes")};
+    if (!item.id && optionalText(data, "serial")) body.serial = optionalText(data, "serial");
+    if (item.id) await api(`/api/inventory/${item.id}`, "PATCH", {...body, version:item.version});
+    else await api("/api/inventory", "POST", body);
+    await show("inventory"); feedback.textContent = "Inventory saved.";
+  });
+}
+async function inventoryView() {
+  const items = await api("/api/inventory?include_retired=true");
+  return [heading("Inventory", "Equipment you own. Serial numbers stay private and are never sent to the assistant.", button("Refresh", () => show("inventory"))),
+    node("details", {open:!items.length}, node("summary", {}, "Add owned equipment"), inventoryForm()),
+    ...(items.length ? items.map((i) => node("article", {className:"card"}, node("h3", {}, i.name),
+      chip(i.category), chip(i.lifecycle), chip(`${i.allocated} of ${i.quantity} allocated`, i.allocated > i.quantity),
+      node("p", {}, [i.manufacturer, i.model].filter(Boolean).join(" ") || "Model unknown"),
+      Object.keys(i.attributes).length ? node("p", {}, Object.entries(i.attributes).map(([k, v]) => `${k}: ${v}`).join(" · ")) : null,
+      node("details", {}, node("summary", {}, "Edit item"), inventoryForm(i)),
+      button("Delete", () => action(async () => {
+        if (!confirm(`Delete “${i.name}” from inventory?`)) return;
+        await api(`/api/inventory/${i.id}`, "DELETE"); await show("inventory");
+      })))) : [empty("No owned equipment recorded. Inventory is never assumed to be complete.")])];
+}
+async function memoryView() {
+  const [facts, projectList] = await Promise.all([api("/api/memory"), api("/api/projects")]);
+  const projectName = (id) => projectList.find((p) => p.id === id)?.name ?? `project ${id}`;
+  const factRow = (f) => node("article", {className:"row"}, node("div", {},
+      node("strong", {}, `${f.key}: ${f.value}${f.unit ? " " + f.unit : ""}`), " ", chip(f.status, f.status === "suggested"),
+      node("p", {}, `${f.scope}${f.project_id ? " · " + projectName(f.project_id) : ""}${f.listing_id ? " · listing " + f.listing_id : ""} · ${f.source} · ${f.origin}`)),
+    node("div", {className:"actions"},
+      f.status === "suggested" ? button("Approve", () => patch(f, {action:"approve"}, "Fact approved.")) : null,
+      ["suggested","approved"].includes(f.status) ? button("Correct", () => {
+        const value = prompt(`Correct value for ${f.key}`, f.value);
+        if (value?.trim()) void patch(f, {action:"correct", value:value.trim()}, "Correction saved; the old value is superseded.");
+      }) : null,
+      ["suggested","approved"].includes(f.status) ? button("Reject", () => patch(f, {action:"reject"}, "Fact rejected.")) : null,
+      button("Delete", () => action(async () => {
+        if (!confirm(`Delete fact “${f.key}”?`)) return;
+        await api(`/api/memory/${f.id}`, "DELETE"); await show("memory"); feedback.textContent = "Fact deleted.";
+      }))));
+  const patch = (f, body, message) => action(async () => { await api(`/api/memory/${f.id}`, "PATCH", {version:f.version, ...body}); await show("memory"); feedback.textContent = message; });
+  const active = facts.filter((f) => ["suggested","approved"].includes(f.status));
+  return [heading("Memory", "Only facts you approve are used in chat. Deleting a conversation does not delete approved facts.",
+      button("Refresh", () => show("memory")), node("a", {className:"button", href:"/api/memory/export", download:"memory-export.json"}, "Export approved facts")),
+    node("details", {}, node("summary", {}, "Add a fact"), form([
+      select("scope", "Applies to", [["global","Everything"], ...projectList.map((p) => [`project:${p.id}`, `Project · ${p.name}`])], "global"),
+      input("key", "Fact", "", {required:true, maxlength:"80"}), input("value", "Value", "", {required:true, maxlength:"500"}), input("unit", "Unit")
+    ], "Save fact", async (data) => {
+      const scope = data.get("scope");
+      await api("/api/memory", "POST", {scope:scope === "global" ? "global" : "project", project_id:scope === "global" ? null : Number(scope.split(":")[1]),
+        key:data.get("key"), value:data.get("value"), unit:optionalText(data, "unit")});
+      await show("memory"); feedback.textContent = "Fact saved and approved.";
+    })),
+    section("Active facts", active.map(factRow), "No approved or suggested facts."),
+    node("details", {}, node("summary", {}, "Rejected and superseded history"), ...facts.filter((f) => !active.includes(f)).map(factRow))];
+}
+async function listingProjects(item) {
+  const [linked, all] = await Promise.all([api(`/api/listings/${item.id}/projects`), api("/api/projects?status=active")]);
+  const available = all.filter((p) => !linked.some((l) => l.id === p.id));
+  return node("section", {}, node("h2", {}, "Projects"),
+    ...(linked.length ? linked.map((p) => node("div", {className:"row"}, node("span", {}, `${p.name} · ${p.role}`),
+      button("Open project", () => action(() => projectDetail(p.id))))) : [empty("Not linked to a project. Listings don't have to belong to one.")]),
+    available.length ? form([select("project", "Add to project", available.map((p) => [p.id, p.name]), available[0].id),
+      select("role", "Role", roles.slice(0, 3).map((r) => [r, r]), "candidate")], "Link to project", async (data) => {
+      await api(`/api/projects/${data.get("project")}/listings`, "POST", {listing_id:item.id, role:data.get("role")});
+      await detail(item.id); feedback.textContent = "Linked to project.";
+    }) : null);
 }
 async function activity() {
   const runs = await api("/api/runs");
@@ -495,7 +721,7 @@ async function settings() {
       item.error ? node("p", {className:"error"}, item.error) : null,
       node("pre", {}, item.payload || "No retained payload."))), "No notifications have been recorded.")];
 }
-const views = {overview, listings, watchlists, activity, settings};
+const views = {overview, listings, watchlists, projects, inventory:inventoryView, memory:memoryView, activity, settings};
 async function show(name) {
   const renderId = ++generation;
   feedback.textContent = "";

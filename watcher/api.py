@@ -25,6 +25,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .assistant import PROMPT_VERSION, TERMINAL, AssistantRunner, FixtureAssistantProvider, capabilities_dict
+from .errors import ApiError
+from .purchasing import register as register_purchasing
 from .core import Contract, ListingCandidate, ListingInput, Short, Source, Watchlist, seller_draft
 from .providers import ConsoleNotifier, SOURCES, TelegramNotifier
 from .store import Store, utc
@@ -69,10 +71,11 @@ class EvidenceIn(Contract):
 
 class ConversationIn(Contract):
     listing_id: int = Field(ge=1)
+    project_id: int | None = Field(default=None, ge=1)
     title: Short | None = None
 
 
-EXCLUDABLE = r"^(listing:description|history|evidence:[1-9][0-9]{0,9})$"
+EXCLUDABLE = r"^(listing:description|history|project|memory|evidence:[1-9][0-9]{0,9})$"
 
 
 class ConversationPatch(Contract):
@@ -80,6 +83,7 @@ class ConversationPatch(Contract):
     title: Short | None = None
     archived: bool | None = None
     excluded: list[Annotated[str, StringConstraints(pattern=EXCLUDABLE)]] | None = Field(default=None, max_length=50)
+    project_id: int | None = Field(default=None, ge=1)
 
 
 RequestKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{8,80}$")]
@@ -89,15 +93,11 @@ class MessageIn(Contract):
     content: str = Field(min_length=1, max_length=4000)
     request_key: RequestKey
     listing_id: int = Field(ge=1)
+    project_id: int | None = Field(default=None, ge=1)
 
 
 class RetryIn(Contract):
     request_key: RequestKey
-
-
-class ApiError(Exception):
-    def __init__(self, status, code, detail):
-        self.status, self.code, self.detail = status, code, detail
 
 
 def problem(status, detail, code=None, **extra):
@@ -467,8 +467,11 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
         with store.connect() as db:
             row = require(db, "listings", body.listing_id)
             title = body.title or ("Chat · " + (json.loads(row["data"]).get("title") or "Untitled listing"))[:160]
-            identifier = db.execute("""INSERT INTO conversations(scope,listing_id,title,created,updated)
-                                       VALUES('listing',?,?,?,?)""", (body.listing_id, title, now, now)).lastrowid
+            if body.project_id is not None:
+                require(db, "projects", body.project_id)
+            identifier = db.execute("""INSERT INTO conversations(scope,listing_id,project_id,title,created,updated)
+                                       VALUES('listing',?,?,?,?,?)""",
+                                    (body.listing_id, body.project_id, title, now, now)).lastrowid
             return conversation_row(db, conversation(db, identifier))
 
     @app.get("/api/conversations/{identifier}")
@@ -485,6 +488,10 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
             updates = {key: value for key, value in (("title", body.title), ("archived", body.archived),
                        ("excluded", json.dumps(sorted(set(body.excluded))) if body.excluded is not None else None))
                        if value is not None}
+            if "project_id" in body.model_fields_set:
+                if body.project_id is not None:
+                    require(db, "projects", body.project_id)
+                updates["project_id"] = body.project_id
             assignments = "".join(f"{key}=?," for key in updates)
             db.execute(f"UPDATE conversations SET {assignments}version=version+1,updated=? WHERE id=?",
                        (*updates.values(), clock(), identifier))
@@ -542,6 +549,8 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
             if row["listing_id"] != body.listing_id:
                 raise ApiError(409, "scope_mismatch",
                                "This conversation is about a different listing. Start a new conversation for it.")
+            if "project_id" in body.model_fields_set and row["project_id"] != body.project_id:
+                raise ApiError(409, "scope_mismatch", "The conversation's project changed. Reload before sending.")
             if row["archived"]:
                 raise ApiError(409, "conversation_archived", "Unarchive the conversation to continue it")
             if db.execute("SELECT 1 FROM assistant_runs WHERE conversation_id=? AND status IN ('queued','running')",
@@ -635,6 +644,8 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
         return {"provider": capabilities_dict(runner.provider), "enabled": runner.provider is not None,
                 "cloud_enabled": False, "today": totals,
                 "note": "Usage is recorded per run. The fixture assistant has no cost. No cloud provider is configured."}
+
+    register_purchasing(app, store, clock)
 
     @app.get("/health/live")
     async def live():

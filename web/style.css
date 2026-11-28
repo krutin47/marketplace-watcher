@@ -48,3 +48,5 @@ details{margin-bottom:.75rem}summary{cursor:pointer;font-weight:650}
   .chat{position:sticky;top:1rem}
 }
 @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+fieldset.requirement{border:1px solid var(--line);border-radius:10px;margin:0 0 .8rem;display:grid;gap:.6rem;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr))}
+legend{font-weight:650}

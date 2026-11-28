@@ -12,6 +12,7 @@ import time
 from typing import AsyncIterator, Protocol
 
 from .core import normalize
+from . import purchasing
 
 logger = logging.getLogger("uvicorn.error.marketplace_watcher.assistant")
 
@@ -58,6 +59,8 @@ class ContextPacket:
     omitted: list[str]
     excluded: list[str]
     injection_suspected: bool = False
+    project: dict | None = None
+    facts: list[dict] = field(default_factory=list)
 
     def system_prompt(self) -> str:
         """Render for text-based providers. Untrusted text is delimited and never placed in the rules."""
@@ -70,6 +73,11 @@ class ContextPacket:
         for item in self.evidence:
             parts.append(f'<untrusted ref="{item["ref"]}" kind="{item["kind"]}" origin="{_neutralize(item["origin"])}"'
                          f' received="{item.get("received_at") or "unknown"}">\n{_neutralize(item["content"])}\n</untrusted>')
+        if self.project:
+            parts.append(f"CONTEXT [{self.project['ref']}] user's project (JSON):\n"
+                         + json.dumps(self.project, sort_keys=True, ensure_ascii=False))
+        if self.facts:
+            parts.append("CONTEXT user-approved memory facts (JSON):\n" + json.dumps(self.facts, sort_keys=True))
         if self.omitted:
             parts.append("OMITTED from this request: " + "; ".join(self.omitted))
         return "\n\n".join(parts)
@@ -115,7 +123,8 @@ MODEL = re.compile(r"\b(?=[A-Z0-9-]*\d)(?=[A-Z0-9-]*[A-Z])[A-Z0-9]{1,8}(?:-[A-Z0
 
 
 def build_context(listing: dict, observation: dict | None, evidence: list[dict], history: list[dict],
-                  question: str, excluded: list[str], *, budget: int = CONTEXT_CHAR_BUDGET) -> ContextPacket:
+                  question: str, excluded: list[str], *, budget: int = CONTEXT_CHAR_BUDGET,
+                  project: dict | None = None, facts: list[dict] | None = None) -> ContextPacket:
     """Assemble a bounded context packet. Latest user-provided evidence has priority over older material."""
     ref = f"listing:{listing['id']}" + (f"@obs:{observation['id']}" if observation else "")
     excluded_set = set(excluded)
@@ -130,6 +139,25 @@ def build_context(listing: dict, observation: dict | None, evidence: list[dict],
                 "captured_at": core["revision_observed"] or core["last_seen"]}]
     omitted: list[str] = []
     used = len(json.dumps(core)) + len(question) + len(SYSTEM_RULES)
+    if project is not None and "project" not in excluded_set:
+        used += len(json.dumps(project, default=str))
+        sources.append({"ref": project["ref"], "kind": "project", "label": f"Project · {project['name']}",
+                        "captured_at": project["updated"]})
+        for item in project["inventory"]:
+            sources.append({"ref": item["ref"], "kind": "inventory", "label": f"Owned · {item['name']}",
+                            "captured_at": None})
+    else:
+        project = None
+    chosen_facts = []
+    if facts and "memory" not in excluded_set:
+        for fact in facts[:40]:
+            used += len(fact["value"]) + len(fact["key"])
+            chosen_facts.append({"ref": f"memory:{fact['id']}", "scope": fact["scope"], "key": fact["key"],
+                                 "value": fact["value"], "unit": fact["unit"]})
+            sources.append({"ref": f"memory:{fact['id']}", "kind": "memory", "label": f"Approved fact · {fact['key']}",
+                            "captured_at": None})
+        if len(facts) > 40:
+            omitted.append(f"{len(facts) - 40} approved memory facts (limit)")
 
     chosen_evidence = []
     for item in sorted(evidence, key=lambda e: (e.get("received_at") or e["created"], e["id"]), reverse=True):
@@ -182,7 +210,8 @@ def build_context(listing: dict, observation: dict | None, evidence: list[dict],
 
     texts = [description or "", *(e["content"] for e in chosen_evidence)]
     return ContextPacket(PROMPT_VERSION, core, chosen_evidence, chosen_history, question, sources, omitted,
-                         sorted(excluded_set), injection_suspected=any(INJECTION.search(t) for t in texts))
+                         sorted(excluded_set), injection_suspected=any(INJECTION.search(t) for t in texts),
+                         project=project, facts=chosen_facts)
 
 
 def _money(listing):
@@ -229,6 +258,14 @@ def fixture_reply(packet: ContextPacket) -> str:
         lines.append("Your notes:")
         for item in notes:
             lines.append(f"- \"{item['content'][:300]}\" [{item['ref']}]")
+
+    if packet.project:
+        lines.extend(["", *_project_lines(packet.project, listing)])
+    if packet.facts:
+        lines.append("")
+        lines.append("Approved facts I am using:")
+        for fact in packet.facts:
+            lines.append(f"- {fact['key']}: {fact['value']}{' ' + fact['unit'] if fact['unit'] else ''} [{fact['ref']}]")
 
     corpus = " ".join(filter(None, [listing["title"], listing["description"],
                                     *(e["content"] for e in packet.evidence)]))
@@ -295,6 +332,54 @@ class FixtureAssistantProvider:
                     output_tokens=len(text) // 4)
 
 
+def project_context(db, row) -> dict:
+    """Project view for the assistant. Serial numbers and acquisition costs are never included."""
+    return {"ref": f"project:{row['id']}@v{row['version']}", "id": row["id"], "name": row["name"],
+            "status": row["status"], "description": row["description"], "updated": row["updated"],
+            "budget": purchasing.budget_summary(db, row),
+            "requirements": [{"label": r["label"], "attribute": r["attribute"], "operator": r["operator"],
+                              "value": r["value"], "unit": r["unit"], "hardness": r["hardness"], "weight": r["weight"]}
+                             for r in purchasing.requirements(db, row["id"])],
+            "inventory": [{"ref": f"inventory:{a['id']}", "name": a["name"], "category": a["category"],
+                           "manufacturer": a["manufacturer"], "model": a["model"], "allocated": a["allocated"],
+                           "attributes": json.loads(a["attributes"])}
+                          for a in purchasing.allocations(db, row["id"])]}
+
+
+def _requirement_text(r):
+    if r["operator"] == "present":
+        return f"{r['label']} ({r['attribute']} must be known)"
+    return f"{r['label']} ({r['attribute']} {r['operator']} {r['value']}{' ' + r['unit'] if r['unit'] else ''})"
+
+
+def _project_lines(project, listing):
+    budget = project["budget"]
+    lines = [f"Project context: {project['name']} [{project['ref']}] ({project['status']})"]
+    if budget["budget"] is None:
+        lines.append("- No budget is set for this project.")
+    else:
+        lines.append(f"- Budget {budget['budget']} {budget['currency']}; confirmed purchases {budget['actual']}; "
+                     f"remaining {budget['remaining']} {budget['currency']}. {budget['committed_note']}")
+        if listing["price"] is not None and listing["currency"] == budget["currency"] and float(budget["remaining"]) > 0:
+            share = float(listing["price"]) / float(budget["remaining"]) * 100
+            lines.append(f"- This asking price would use {share:.0f}% of the remaining budget"
+                         + (" and exceeds it." if share > 100 else "."))
+        elif listing["price"] is not None and listing["currency"] != budget["currency"]:
+            lines.append("- The listing currency differs from the budget currency; no conversion was made.")
+    hard = [r for r in project["requirements"] if r["hardness"] == "hard"]
+    soft = [r for r in project["requirements"] if r["hardness"] == "soft"]
+    if hard:
+        lines.append("- Hard requirements (not yet checked automatically; verify each): "
+                     + "; ".join(_requirement_text(r) for r in hard))
+    if soft:
+        lines.append("- Preferences: " + "; ".join(f"{_requirement_text(r)} weight {r['weight']}" for r in soft))
+    for item in project["inventory"]:
+        model = " ".join(filter(None, [item["manufacturer"], item["model"]]))
+        lines.append(f"- You own and allocated {item['allocated']} × {item['name']}{' (' + model + ')' if model else ''} "
+                     f"[{item['ref']}]. Compatibility with this listing is unknown until verified.")
+    return lines
+
+
 def encode(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
@@ -343,12 +428,18 @@ class AssistantRunner:
         evidence = [dict(e) for e in db.execute("SELECT * FROM evidence WHERE listing_id=? ORDER BY id", (row["id"],))]
         superseded = {e["supersedes_id"] for e in evidence if e["supersedes_id"]}
         evidence = [e for e in evidence if e["id"] not in superseded]
+        project = None
+        if conversation["project_id"] is not None:
+            project_row = db.execute("SELECT * FROM projects WHERE id=?", (conversation["project_id"],)).fetchone()
+            project = project_context(db, project_row)
+        facts = purchasing.approved_facts(db, conversation["project_id"], row["id"])
         user_message = db.execute("SELECT * FROM chat_messages WHERE id=?", (run["user_message_id"],)).fetchone()
         history = [dict(m) for m in db.execute("""SELECT role,content,status FROM chat_messages
             WHERE conversation_id=? AND seq<? AND status IN ('complete','partial') ORDER BY seq""",
             (run["conversation_id"], user_message["seq"]))]
         packet = build_context(listing, dict(observation) if observation else None, evidence, history,
-                               user_message["content"], json.loads(conversation["excluded"]))
+                               user_message["content"], json.loads(conversation["excluded"]),
+                               project=project, facts=facts)
         return packet, user_message
 
     # ----- lifecycle -----
