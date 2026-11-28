@@ -28,3 +28,23 @@ form .actions{margin-top:1rem}.filters{margin-bottom:1rem;align-items:end}
 .error{color:#862617}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
 dt{font-weight:650}dd{margin:0 0 .5rem}
 details{margin-bottom:.75rem}summary{cursor:pointer;font-weight:650}
+.prewrap{white-space:pre-wrap;color:var(--ink)}
+.pane-tabs{display:flex;gap:.5rem;margin-bottom:1rem}
+.pane-tabs [role=tab][aria-selected=true]{background:var(--accent);color:#fff;border-color:var(--accent)}
+.workspace{display:grid;gap:1.25rem}
+.pane.inactive{display:none}
+.chat{display:flex;flex-direction:column;gap:.6rem;min-width:0}
+.log{border:1px solid var(--line);border-radius:12px;background:var(--white);padding:.75rem;min-height:14rem;max-height:60vh;overflow-y:auto}
+.bubble{border-radius:10px;padding:.6rem .75rem;margin-bottom:.6rem;border:1px solid var(--line)}
+.bubble.user{background:#e7f0e1;margin-left:min(12%,3rem)}
+.bubble.assistant{background:#fffefa;margin-right:min(12%,3rem)}
+.bubble .actions button{min-height:36px;padding:.2rem .6rem;font-size:.85rem}
+.composer{margin:0}.composer textarea{width:100%}
+.context label{font-weight:500}
+@media (min-width:1000px){
+  .pane-tabs{display:none}
+  .workspace{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start}
+  .pane.inactive{display:block}.chat.inactive{display:flex}
+  .chat{position:sticky;top:1rem}
+}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}

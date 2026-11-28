@@ -213,6 +213,9 @@ class Store:
     def prune(self, now, retention):
         cutoff = now - retention * 86400
         with self.connect() as db:
-            db.execute("DELETE FROM observations WHERE observed<?", (cutoff,))
+            # Keep each listing's current revision: chat context snapshots cite it (ADR-13).
+            db.execute("""DELETE FROM observations WHERE observed<? AND id NOT IN (
+                SELECT (SELECT c.id FROM observations c WHERE c.listing_id=o.listing_id ORDER BY c.observed DESC, c.id DESC LIMIT 1)
+                FROM observations o GROUP BY o.listing_id)""", (cutoff,))
             db.execute("DELETE FROM runs WHERE finished<?", (cutoff,))
             db.execute("UPDATE outbox SET payload='',error=NULL WHERE due<? AND status IN ('delivered','failed','muted','suppressed')", (cutoff,))

@@ -31,6 +31,14 @@ If a local TLS inspection proxy supplies a CA that the container image lacks, pr
 - Scheduled polls use simulated listings. To add real listings, use **Listings → Import listing manually** or the authenticated forwarding API.
 - Open a real listing's details, generate or edit the seller draft, and choose **Copy draft**. Use **Open listing** to paste and send it yourself on the marketplace. Optional Telegram alerts go to your configured Telegram chat.
 
+## Chat about a listing
+
+Open any listing. On a wide screen the details sit on the left and the chat on the right; on a phone, switch between **Details** and **Chat**. The listing's latest stored revision, its description and your seller updates are attached to each message automatically. Use **Seller updates and notes** to record a seller's reply (for example, drive power-on hours); it is stored as a claim with its origin and received time and never overwrites the original listing. **Context sent with each message** lets you leave out the description, individual notes or earlier turns.
+
+The bundled assistant is a **deterministic offline fixture, not an AI model**. It produces template replies grounded in stored data so the workflow, persistence, streaming and safety controls can be tested without credentials or cost. No cloud AI provider is implemented; adding one requires owner approval (see `docs/DECISIONS.md`). Set `ASSISTANT_PROVIDER=none` to disable chat entirely. The assistant cannot contact sellers, make offers or change any record.
+
+Replies stream over Server-Sent Events from `GET /api/assistant/runs/{id}/events` and are saved as they arrive, so reloading or reconnecting never loses completed turns. Interrupted replies are kept and labeled partial, and can be retried.
+
 ## Demo
 
 On a fresh database, open **Overview → Add demo watchlists**. The examples are editable and use simulated fixtures. For an isolated demonstration, create only an **8TB HDD** fixture watchlist with phrase `8TB HDD`, maximum `50 CAD`, and the default location. Wait until Activity shows its first successful run, then use **Run now** twice, waiting for each successful run to finish. The default polling interval is five minutes, and manual runs share the same source limits.
@@ -133,4 +141,6 @@ The frontend consists of static HTML, CSS and JavaScript, so it has no bundling 
 WATCHER_TEST_ORIGIN=http://127.0.0.1:8000 node tests/browser-smoke.cjs
 ```
 
-Set `CHROMIUM_PATH` to use a system Chromium instead of Playwright's bundled browser. See `VERIFICATION.md` for observed checks and results.
+`tests/browser-chat.cjs` exercises the listing chat at phone and desktop widths against its own empty instance. Set `AXE_PATH` to an `axe.min.js` from `axe-core` to add an automated accessibility scan.
+
+Set `CHROMIUM_PATH` to use a system Chromium instead of Playwright's bundled browser. See `VERIFICATION.md` and `docs/IMPLEMENTATION_STATUS.md` for observed checks and results, and `docs/DECISIONS.md` for architecture decisions.

@@ -204,9 +204,7 @@ async function detail(id) {
     })), button("Copy draft", () => action(async () => {
       await navigator.clipboard.writeText(draftForm.elements.message.value); feedback.textContent = "Draft copied.";
     })));
-  view.replaceChildren(heading(item.title || "Untitled listing", `${sourceName(item.source)} · ${money(item)}`,
-    button(selectedRun ? "Back to run listings" : "Back to listings", () => show("listings")),
-    item.source === "fixture" ? null : link(item.url)),
+  const details = node("div", {id:"pane-details", className:"pane", role:"tabpanel", "aria-labelledby":"tab-details"},
     node("div", {className:"card"}, node("p", {}, item.description || "Description unknown"),
       node("p", {}, `Location · ${item.location || "Unknown"} | Condition · ${item.condition || "Unknown"}`),
       node("p", {}, `Distance · ${item.distance_km == null ? "Unknown" : item.distance_km + " km from " + (item.distance_from || "unknown origin")}`),
@@ -221,12 +219,251 @@ async function detail(id) {
     node("h2", {}, "Seller message"),
     node("p", {}, item.source === "fixture" ? "You can try the draft tools on this simulated listing."
       : "Copy the draft, open the listing, and send it yourself on the marketplace."),
-    draftForm);
-  view.querySelector('[name="state"]').addEventListener("change", (event) => action(async () => {
+    draftForm, await evidencePanel(item, renderId));
+  if (renderId !== generation) return;
+  const chat = await chatPanel(item, renderId);
+  if (renderId !== generation) return;
+  const tabs = node("div", {className:"pane-tabs", role:"tablist", "aria-label":"Listing workspace"},
+    ...[["details","Details"],["chat","Chat"]].map(([key, label]) => node("button", {type:"button", role:"tab", id:`tab-${key}`,
+      "aria-controls":`pane-${key}`, "aria-selected": String(key === "details"), onclick:() => selectPane(key)}, label)));
+  function selectPane(key) {
+    for (const tab of tabs.querySelectorAll("[role=tab]")) tab.setAttribute("aria-selected", String(tab.id === `tab-${key}`));
+    details.classList.toggle("inactive", key !== "details");
+    chat.classList.toggle("inactive", key !== "chat");
+  }
+  selectPane(new URLSearchParams(location.search).get("pane") === "chat" ? "chat" : "details");
+  view.replaceChildren(heading(item.title || "Untitled listing", `${sourceName(item.source)} · ${money(item)}`,
+    button(selectedRun ? "Back to run listings" : "Back to listings", () => show("listings")),
+    item.source === "fixture" ? null : link(item.url)),
+    tabs, node("div", {className:"workspace"}, details, chat));
+  details.querySelector('[name="state"]').addEventListener("change", (event) => action(async () => {
     await api(base + "/state", "PATCH", {state:event.target.value}); feedback.textContent = "Listing state saved.";
   }));
   view.querySelector("h1").setAttribute("tabindex","-1");
   view.querySelector("h1").focus();
+}
+const evidenceLabel = (kind) => kind === "seller_claim" ? "Seller claim" : "Your note";
+const requestKey = () => (crypto.randomUUID ? crypto.randomUUID()
+  : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join(""));
+const memoryGet = (key) => { try { return sessionStorage.getItem(key) ?? ""; } catch { return ""; } };
+const memorySet = (key, value) => { try { value ? sessionStorage.setItem(key, value) : sessionStorage.removeItem(key); } catch { /* storage unavailable */ } };
+
+async function evidencePanel(item) {
+  const base = `/api/listings/${item.id}/evidence`;
+  const list = node("div", {});
+  async function refresh() {
+    const data = await api(base);
+    list.replaceChildren(...(data.items.length ? data.items.map((entry) => node("div", {className:"row"},
+      node("div", {}, chip(evidenceLabel(entry.kind), entry.kind === "seller_claim"),
+        node("p", {className:"prewrap"}, entry.content),
+        node("small", {}, `${entry.origin} · ${entry.received_at ? "received " + timestamp(entry.received_at) + " · " : ""}added ${timestamp(entry.created)} · evidence:${entry.id}`))))
+      : [empty("No seller updates or notes yet. The original listing is never overwritten.")]));
+  }
+  await refresh();
+  const entry = form([
+    select("kind", "Type", [["seller_claim","Seller reply or claim"],["user_note","My note"]], "seller_claim"),
+    input("origin", "Where it came from", "seller via marketplace message", {maxlength:"160", required:true}),
+    input("received_at", "Received at (local time, optional)", "", {type:"datetime-local"}),
+    input("content", "Text", "", {multiline:true, maxlength:"4000", required:true})
+  ], "Add update", async (data) => {
+    const body = {kind:data.get("kind"), origin:data.get("origin"), content:data.get("content")};
+    if (data.get("received_at")) body.received_at = new Date(data.get("received_at")).toISOString();
+    await api(base, "POST", body);
+    entry.elements.content.value = "";
+    await refresh();
+    document.dispatchEvent(new CustomEvent("evidence-changed", {detail:item.id}));
+    feedback.textContent = "Update saved. The chat uses it on the next message.";
+  });
+  return node("section", {}, node("h2", {}, "Seller updates and notes"),
+    node("p", {}, "Seller replies are stored as claims, not verified facts. Screenshots and files are not supported yet; transcribe them here."),
+    node("details", {}, node("summary", {}, "Add a seller update or note"), entry), list);
+}
+
+async function chatPanel(item) {
+  const pane = node("div", {id:"pane-chat", className:"pane chat", role:"tabpanel", "aria-labelledby":"tab-chat"});
+  let [usage, conversations, evidence] = await Promise.all([api("/api/assistant/usage"),
+    api(`/api/conversations?listing_id=${item.id}`), api(`/api/listings/${item.id}/evidence?limit=100`)]);
+  let current = conversations[0] || null;
+  let stream = null;
+  let activeRun = null;
+  const status = node("p", {role:"status", className:"muted"});
+  const log = node("div", {className:"log", role:"log", "aria-live":"off", "aria-label":"Conversation", tabindex:"0"});
+  const jump = button("Jump to latest", () => { log.scrollTop = log.scrollHeight; jump.hidden = true; });
+  jump.hidden = true;
+  const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+  log.addEventListener("scroll", () => { if (nearBottom()) jump.hidden = true; });
+  const draftKey = () => `chat-draft:${item.id}:${current?.id ?? "new"}`;
+  const compose = node("textarea", {name:"content", maxlength:"4000", rows:"3", "aria-label":"Message about this listing"});
+  compose.addEventListener("input", () => memorySet(draftKey(), compose.value));
+  const send = node("button", {className:"primary", type:"submit"}, "Send");
+  const stop = button("Stop", () => action(async () => { if (activeRun) await api(`/api/assistant/runs/${activeRun}/cancel`, "POST"); }));
+  stop.hidden = true;
+  const picker = node("select", {"aria-label":"Conversation"});
+  const contextBox = node("div", {});
+  const header = node("div", {className:"actions"});
+
+  function follow(apply) {
+    const stick = nearBottom();
+    apply();
+    if (stick) log.scrollTop = log.scrollHeight; else jump.hidden = false;
+  }
+  function bubble(message) {
+    const text = node("p", {className:"prewrap"}, message.content);
+    const labels = {partial:"Partial reply · interrupted", cancelled:"Stopped by you", failed:"Failed"};
+    return node("article", {className:`bubble ${message.role}`, "data-seq":message.seq},
+      node("small", {}, message.role === "user" ? "You" : "Assistant", " · ", timestamp(message.created)),
+      labels[message.status] ? chip(labels[message.status], true) : null, text,
+      message.role === "assistant" ? node("div", {className:"actions"},
+        button("Copy", () => action(async () => { await navigator.clipboard.writeText(message.content); feedback.textContent = "Reply copied."; })),
+        message.status !== "complete" && message.run_id ? button("Retry", () => retry(message.run_id)) : null) : null);
+  }
+  async function loadMessages() {
+    if (!current) { log.replaceChildren(empty("Ask anything about this listing. Its stored details and your seller updates are attached automatically.")); return; }
+    const data = await api(`/api/conversations/${current.id}/messages?limit=100`);
+    follow(() => log.replaceChildren(...(data.items.length ? data.items.map(bubble) : [empty("No messages yet.")])));
+    const last = current.last_run;
+    if (current.active_run) watch(current.active_run.id);
+    else if (data.items.at(-1)?.role === "user" && last && ["failed", "cancelled", "interrupted"].includes(last.status)) {
+      log.append(node("div", {className:"card"}, node("p", {className:"error"}, `No reply was saved (${last.error_code || last.status}).`),
+        button("Retry", () => retry(last.id))));
+    }
+  }
+  function setBusy(runId) {
+    activeRun = runId;
+    send.disabled = !!runId || !usage.enabled;
+    stop.hidden = !runId;
+  }
+  function watch(runId) {
+    if (stream) stream.close();
+    setBusy(runId);
+    const live = node("article", {className:"bubble assistant", "aria-busy":"true"}, node("small", {}, "Assistant · replying…"));
+    const text = node("p", {className:"prewrap"});
+    live.append(text);
+    follow(() => log.append(live));
+    status.textContent = "Assistant is replying…";
+    stream = new EventSource(`/api/assistant/runs/${runId}/events`);
+    stream.addEventListener("evidence", (event) => {
+      const data = JSON.parse(event.data);
+      live.append(node("small", {}, "Context: " + data.sources.map((source) => source.label).join(", ")
+        + (data.omitted.length ? ` · omitted: ${data.omitted.length}` : "")));
+    });
+    stream.addEventListener("delta", (event) => {
+      if (!pane.isConnected) { stream?.close(); stream = null; return; }
+      follow(() => { text.textContent += JSON.parse(event.data).text; });
+    });
+    for (const kind of ["completed", "failed", "cancelled"]) {
+      stream.addEventListener(kind, (event) => {
+        const data = JSON.parse(event.data);
+        stream.close(); stream = null; setBusy(null);
+        status.textContent = kind === "completed" ? "Assistant reply complete." : kind === "cancelled" ? "Reply stopped." : `Reply failed: ${data.message}`;
+        void refreshConversation();
+      });
+    }
+    stream.onerror = () => {
+      if (stream && stream.readyState === EventSource.CLOSED) {
+        stream = null; setBusy(null); status.textContent = "Connection lost. Reloading saved messages.";
+        void refreshConversation();
+      }
+    };
+  }
+  async function retry(runId) {
+    await action(async () => { const result = await api(`/api/assistant/runs/${runId}/retry`, "POST", {request_key:requestKey()}); watch(result.run_id); });
+  }
+  async function refreshConversation() {
+    if (!pane.isConnected) return;
+    if (current) current = await api(`/api/conversations/${current.id}`);
+    renderHeader(); renderContext(); await loadMessages();
+  }
+  function renderPicker(list) {
+    picker.replaceChildren(...list.map((c) => node("option", {value:c.id}, c.title)), node("option", {value:""}, "+ New conversation"));
+    picker.value = current ? String(current.id) : "";
+  }
+  picker.addEventListener("change", () => action(async () => {
+    current = picker.value ? await api(`/api/conversations/${picker.value}`) : null;
+    compose.value = memoryGet(draftKey());
+    await refreshConversation();
+  }));
+  function renderHeader() {
+    header.replaceChildren(
+      current ? button("Rename", () => action(async () => {
+        const title = prompt("Conversation name", current.title);
+        if (!title?.trim()) return;
+        current = await api(`/api/conversations/${current.id}`, "PATCH", {version:current.version, title:title.trim()});
+        renderPicker(await api(`/api/conversations?listing_id=${item.id}`)); renderHeader();
+      })) : null,
+      current ? button("Archive", () => action(async () => {
+        await api(`/api/conversations/${current.id}`, "PATCH", {version:current.version, archived:true});
+        const rest = await api(`/api/conversations?listing_id=${item.id}`); current = rest[0] || null;
+        renderPicker(rest); await refreshConversation(); feedback.textContent = "Conversation archived.";
+      })) : null,
+      current ? button("Delete", () => action(async () => {
+        if (!confirm("Delete this conversation and its messages? Listing details, seller updates and notes are kept.")) return;
+        await api(`/api/conversations/${current.id}`, "DELETE");
+        const rest = await api(`/api/conversations?listing_id=${item.id}`); current = rest[0] || null;
+        renderPicker(rest); await refreshConversation(); feedback.textContent = "Conversation deleted.";
+      })) : null);
+  }
+  function renderContext() {
+    const excluded = new Set(current?.excluded ?? []);
+    const options = [["listing:description", "Listing description", item.description != null],
+      ...evidence.items.map((e) => [`evidence:${e.id}`, `${evidenceLabel(e.kind)} · ${e.content.slice(0, 60)}`, true]),
+      ["history", "Earlier messages in this conversation", true]].filter(([, , present]) => present);
+    contextBox.replaceChildren(
+      node("p", {}, `Always attached: ${item.source === "fixture" ? "simulated " : ""}listing title, price, condition, location and timestamps from the latest stored revision.`),
+      ...options.map(([ref, label]) => {
+        const box = node("input", {type:"checkbox", name:ref, disabled:!current});
+        box.checked = !excluded.has(ref);
+        box.addEventListener("change", () => action(async () => {
+          const next = [...contextBox.querySelectorAll("input[type=checkbox]")].filter((b) => !b.checked).map((b) => b.name);
+          current = await api(`/api/conversations/${current.id}`, "PATCH", {version:current.version, excluded:next});
+          feedback.textContent = "Context updated for the next message.";
+        }));
+        return node("label", {}, box, label);
+      }),
+      current ? null : node("small", {}, "Start the conversation to choose optional context."));
+  }
+  const composer = node("form", {className:"composer", onsubmit:(event) => {
+    event.preventDefault();
+    const content = compose.value.trim();
+    if (!content || activeRun) return;
+    send.disabled = true;
+    void action(async () => {
+      if (!current) {
+        current = await api("/api/conversations", "POST", {listing_id:item.id});
+        renderPicker(await api(`/api/conversations?listing_id=${item.id}`));
+        renderHeader(); renderContext();
+        log.replaceChildren();
+      }
+      const key = requestKey();
+      const result = await api(`/api/conversations/${current.id}/messages`, "POST", {content, request_key:key, listing_id:item.id});
+      memorySet(draftKey(), "");
+      compose.value = "";
+      log.querySelector(":scope > .card")?.remove();
+      follow(() => log.append(bubble({role:"user", content, created:Date.now() / 1000, status:"complete"})));
+      watch(result.run_id);
+    }).finally(() => { if (!activeRun) send.disabled = !usage.enabled; });
+  }}, compose, node("div", {className:"actions"}, send, stop, jump));
+  compose.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) composer.requestSubmit();
+  });
+  const onEvidence = (event) => {
+    if (!pane.isConnected) { document.removeEventListener("evidence-changed", onEvidence); return; }
+    if (event.detail !== item.id) return;
+    void action(async () => { evidence = await api(`/api/listings/${item.id}/evidence?limit=100`); renderContext(); });
+  };
+  document.addEventListener("evidence-changed", onEvidence);
+  renderPicker(conversations); renderHeader(); renderContext();
+  compose.value = memoryGet(draftKey());
+  send.disabled = !usage.enabled;
+  pane.append(node("h2", {}, "Chat about this listing"),
+    usage.enabled ? node("p", {}, chip(usage.provider.label), usage.provider.cloud ? chip("Cloud: data leaves this computer", true) : chip("Runs locally"))
+      : node("p", {className:"error"}, "The assistant is disabled. Listing details, notes and seller drafts still work."),
+    node("div", {className:"actions"}, node("label", {}, "Conversation", picker), header),
+    node("details", {className:"context"}, node("summary", {}, "Context sent with each message"), contextBox),
+    log, status, composer,
+    node("small", {}, "The assistant cannot contact sellers, make offers or change records. Ctrl+Enter sends."));
+  await loadMessages();
+  return pane;
 }
 async function activity() {
   const runs = await api("/api/runs");
