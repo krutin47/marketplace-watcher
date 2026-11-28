@@ -691,6 +691,76 @@ async function listingProjects(item) {
       await detail(item.id); feedback.textContent = "Linked to project.";
     }) : null);
 }
+async function comparisonsView() {
+  const [items, stored, projectList] = await Promise.all([api("/api/comparisons"), api("/api/listings?limit=100"), api("/api/projects?status=active")]);
+  const picker = node("fieldset", {className:"checklist"}, node("legend", {}, "Listings (choose 2 to 5)"),
+    ...stored.items.map((l) => node("label", {}, node("input", {type:"checkbox", name:"listing", value:l.id}), `${l.title || "Untitled"} · ${money(l)}${l.source === "fixture" ? " · simulated" : ""}`)));
+  return [heading("Comparisons", "Side-by-side checks of stored listings against a project. Deterministic, never a purchase decision.", button("Refresh", () => show("comparisons"))),
+    node("details", {open:!items.length}, node("summary", {}, "New comparison"), stored.items.length < 2 ? empty("Store at least two listings first.") : form([
+      input("title", "Title (optional)"), select("project", "Project", [["", "No project"], ...projectList.map((p) => [p.id, p.name])], ""), picker
+    ], "Compare", async (data) => {
+      const ids = data.getAll("listing").map(Number);
+      if (ids.length < 2 || ids.length > 5) throw new Error("Choose between 2 and 5 listings.");
+      const created = await api("/api/comparisons", "POST", {title:optionalText(data, "title"), listing_ids:ids,
+        project_id:data.get("project") ? Number(data.get("project")) : null});
+      await comparisonDetail(created.id);
+    })),
+    ...(items.length ? items.map((c) => node("article", {className:"row"}, node("div", {}, node("h3", {}, c.title), node("p", {}, `${c.listing_ids.length} listings · updated ${timestamp(c.updated)}`)),
+      button("Open comparison", () => action(() => comparisonDetail(c.id))))) : [empty("No comparisons yet.")]),
+    calculatorPanel()];
+}
+async function comparisonDetail(id, snapshotId = null) {
+  const renderId = ++generation;
+  const c = await api(`/api/comparisons/${id}${snapshotId ? "?snapshot_id=" + snapshotId : ""}`);
+  if (renderId !== generation) return;
+  const snap = c.snapshot;
+  const rows = [
+    ["Price", (l) => l.price == null ? "Unknown" : `${l.price} ${l.currency || "(currency unknown)"}`],
+    ["Total cost basis", (l) => l.total_cost.basis],
+    ["Budget share", (l) => l.budget_share_percent == null ? "—" : `${l.budget_share_percent}% of remaining`],
+    ["Condition", (l) => l.condition || "Unknown"],
+    ["Drives included", (l) => l.drives.stated ? `${l.drives.count} × ${l.drives.size_tb} TB (stated: “${l.drives.matched}”)` : l.drives.note],
+    ["Usable capacity (calculated)", (l) => l.capacities.length ? l.capacities.map((x) => `${x.layout}: ${x.usable_tb} TB / ${x.usable_tib} TiB`).join("\n") : "Unknown"],
+    ...(snap.project ? [["Requirements", (l) => l.requirements.map((r) => `${r.result === "meets" ? "✓" : r.result === "fails" ? "✗" : "?"} ${r.label} (${r.hardness}): ${r.result} — ${r.basis}`).join("\n") || "None"],
+      ["Outcome", (l) => l.outcome]] : []),
+    ["Seller claims", (l) => l.seller_claims.map((s) => `“${s.content}” [${s.ref}]`).join("\n") || "None recorded"],
+    ["Unknown fields", (l) => l.unknown.join(", ") || "None"],
+    ["Revision", (l) => `${l.ref}${l.simulated ? " · simulated" : ""}`],
+  ];
+  const live = snap.listings.filter((l) => !l.missing);
+  const table = node("div", {className:"table-scroll", tabindex:"0", role:"region", "aria-label":"Comparison table"},
+    node("table", {}, node("caption", {}, `Snapshot ${timestamp(snap.created)} · ${snap.algorithm_version}${snap.project ? " · project " + snap.project.name : ""}`),
+      node("thead", {}, node("tr", {}, node("th", {scope:"col"}, "Attribute"), ...live.map((l) => node("th", {scope:"col"},
+        node("button", {type:"button", className:"linkish", onclick:() => action(() => detail(l.listing_id))}, l.title || "Untitled listing"))))),
+      node("tbody", {}, ...rows.map(([label, cell]) => node("tr", {}, node("th", {scope:"row"}, label), ...live.map((l) => node("td", {className:"prewrap"}, cell(l))))))));
+  view.replaceChildren(heading(c.title, snap.project ? `For ${snap.project.name}` : "No project selected", button("Back to comparisons", () => show("comparisons")),
+      button("Recompute now", () => action(async () => { await api(`/api/comparisons/${id}/refresh`, "POST"); await comparisonDetail(id); feedback.textContent = "New snapshot saved."; }), c.stale ? "primary" : "")),
+    c.stale && !snapshotId ? node("div", {className:"card", role:"alert"}, node("strong", {}, "This snapshot is stale. "), c.stale_reasons.join(". ") + ".") : null,
+    snapshotId ? node("p", {}, chip("Viewing an earlier snapshot", true)) : null,
+    table, ...snap.notes.map((n) => node("p", {}, n)),
+    snap.listings.some((l) => l.missing) ? node("p", {className:"error"}, "Some listings in this comparison no longer exist.") : null,
+    c.history.length > 1 ? section("Snapshot history", c.history.map((h) => node("div", {className:"row"}, node("span", {}, `${timestamp(h.created)} · ${h.algorithm_version}`),
+      button("View", () => action(() => comparisonDetail(id, h.id))))), "") : null);
+  view.querySelector("h1").setAttribute("tabindex", "-1");
+  view.querySelector("h1").focus();
+}
+function calculatorPanel() {
+  const out = node("pre", {className:"card", role:"status"}, "Results appear here.");
+  const render = (result) => { out.textContent = Object.entries(result).map(([k, v]) => `${k}: ${Array.isArray(v) ? "\n  - " + v.join("\n  - ") : v ?? "—"}`).join("\n"); };
+  return node("section", {}, node("h2", {}, "Calculator"),
+    node("p", {}, "Exact arithmetic with stated assumptions. Use it instead of estimating capacities or running costs."),
+    form([input("drives", "Drive sizes in TB (comma-separated)", "4, 4, 4, 4", {required:true}),
+      select("layout", "Layout", [["raid6","RAID6 / RAID-Z2"],["raid5","RAID5 / RAID-Z1"],["mirror","Mirror"],["raid10","RAID10"],["stripe","Stripe (RAID0)"],["jbod","JBOD"]], "raid6")],
+    "Calculate storage", async (data) => render(await api("/api/calculations/storage", "POST", {layout:data.get("layout"),
+      drives_tb:data.get("drives").split(",").map((v) => v.trim()).filter(Boolean)}))),
+    form([input("watts", "Average watts", "", {type:"number", min:"0", step:".1", required:true}), input("hours", "Hours per day", 24, {type:"number", min:"0.1", max:"24", step:".1"}),
+      input("rate", "Rate per kWh (optional)", "", {type:"number", min:"0", step:".0001"}), input("currency", "Rate currency", "CAD")],
+    "Calculate energy", async (data) => {
+      const body = {watts:data.get("watts"), hours_per_day:data.get("hours")};
+      if (optionalText(data, "rate")) Object.assign(body, {rate_per_kwh:optionalText(data, "rate"), currency:data.get("currency").trim().toUpperCase()});
+      render(await api("/api/calculations/energy", "POST", body));
+    }), out);
+}
 async function activity() {
   const runs = await api("/api/runs");
   return [heading("Run activity", "Open a completed run to see every distinct listing it returned.", button("Refresh", () => show("activity"))),
@@ -721,7 +791,7 @@ async function settings() {
       item.error ? node("p", {className:"error"}, item.error) : null,
       node("pre", {}, item.payload || "No retained payload."))), "No notifications have been recorded.")];
 }
-const views = {overview, listings, watchlists, projects, inventory:inventoryView, memory:memoryView, activity, settings};
+const views = {overview, listings, watchlists, projects, inventory:inventoryView, comparisons:comparisonsView, memory:memoryView, activity, settings};
 async function show(name) {
   const renderId = ++generation;
   feedback.textContent = "";

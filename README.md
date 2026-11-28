@@ -39,6 +39,15 @@ The bundled assistant is a **deterministic offline fixture, not an AI model**. I
 
 Replies stream over Server-Sent Events from `GET /api/assistant/runs/{id}/events` and are saved as they arrive, so reloading or reconnecting never loses completed turns. Interrupted replies are kept and labeled partial, and can be retried.
 
+## Projects, inventory, memory and comparisons
+
+- **Projects** hold a purchasing goal, hard requirements (pass/fail) and weighted preferences, an optional budget and linked listings. Once set, a budget can only change with a recorded reason. Spend counts only purchases you explicitly confirm; amounts in other currencies are listed separately and never converted. Commitments from offers are not tracked yet.
+- **Inventory** records equipment you own with typed fields plus free-form specifications. Allocating more to projects than you own requires an override reason. Serial numbers stay private and are never sent to the assistant. Recording a purchase never creates inventory automatically.
+- **Memory** holds facts the assistant may use. Facts you enter are approved; anything suggested waits for your approval. Corrections supersede the old value, and you can reject, delete or export facts.
+- In a listing's chat, choose a **Project context** to include that project's requirements, budget, allocated equipment and approved facts. Only the selected project is used.
+- **Comparisons** put 2–5 stored listings side by side for a project. Drive bundles count only when the text states them (for example `8x4TB`); usable capacity comes from the calculator. Hard requirements are checked only where the app can derive the value (capacity from stated drives, price); everything else is shown as unknown. Snapshots are kept, go stale when listings, notes or the project change, and are recomputed on request. Outcomes are checks, not purchase recommendations.
+- The **Calculator** (Comparisons screen and `POST /api/calculations/{storage,energy,budget}`) uses exact decimal arithmetic and lists its assumptions.
+
 ## Demo
 
 On a fresh database, open **Overview → Add demo watchlists**. The examples are editable and use simulated fixtures. For an isolated demonstration, create only an **8TB HDD** fixture watchlist with phrase `8TB HDD`, maximum `50 CAD`, and the default location. Wait until Activity shows its first successful run, then use **Run now** twice, waiting for each successful run to finish. The default polling interval is five minutes, and manual runs share the same source limits.
@@ -141,6 +150,6 @@ The frontend consists of static HTML, CSS and JavaScript, so it has no bundling 
 WATCHER_TEST_ORIGIN=http://127.0.0.1:8000 node tests/browser-smoke.cjs
 ```
 
-`tests/browser-chat.cjs` exercises the listing chat at phone and desktop widths against its own empty instance. Set `AXE_PATH` to an `axe.min.js` from `axe-core` to add an automated accessibility scan.
+`tests/browser-chat.cjs`, `tests/browser-projects.cjs` and `tests/browser-comparisons.cjs` exercise the chat, project and comparison workflows. Run each against its own empty instance. Set `AXE_PATH` to an `axe.min.js` from `axe-core` to add an automated accessibility scan.
 
 Set `CHROMIUM_PATH` to use a system Chromium instead of Playwright's bundled browser. See `VERIFICATION.md` and `docs/IMPLEMENTATION_STATUS.md` for observed checks and results, and `docs/DECISIONS.md` for architecture decisions.

@@ -22,3 +22,13 @@ Live Telegram delivery, a live marketplace connector, a complete accessibility a
 - All 13 Python tests passed. The new integration test verifies that a queued fixture run stores all distinct results and that pagination and match filters preserve accurate counts.
 - The Chromium smoke test verified that Activity opens all seven distinct fixture results, including the unmatched drive, and that the main feed also includes the manually imported listing.
 - Migrating a prior SQLite snapshot preserved existing listings, watchlists, runs, and outbox records. Earlier runs correctly show that per-run listing results are unavailable.
+
+## Purchasing assistant update (2026-11-28)
+
+- `python -m unittest discover -s tests`: 37 passed (13 baseline watcher, 13 chat, 5 projects/inventory/memory, 6 comparisons/calculations).
+- Chromium: `browser-smoke.cjs`, `browser-chat.cjs`, `browser-projects.cjs` and `browser-comparisons.cjs` passed, with zero serious or critical axe-core 4.10.2 violations on the chat, inventory, project, memory, comparison and calculator screens.
+- A database created by the previous release upgraded from schema 4 to 7 with data intact; foreign key and integrity checks passed; an online backup of the upgraded database passed its quick check.
+- Docker build and volume persistence were not re-run because no Docker daemon was available. The Dockerfile is unchanged.
+- The bundled assistant is a deterministic fixture, not an AI model. No cloud provider, live marketplace source or remote authentication exists.
+
+Details and requirement traceability: `docs/IMPLEMENTATION_STATUS.md`.

@@ -13,6 +13,7 @@ from typing import AsyncIterator, Protocol
 
 from .core import normalize
 from . import purchasing
+from .calculations import bundle_capacities, detect_drive_bundle
 
 logger = logging.getLogger("uvicorn.error.marketplace_watcher.assistant")
 
@@ -61,6 +62,7 @@ class ContextPacket:
     injection_suspected: bool = False
     project: dict | None = None
     facts: list[dict] = field(default_factory=list)
+    calculations: dict | None = None
 
     def system_prompt(self) -> str:
         """Render for text-based providers. Untrusted text is delimited and never placed in the rules."""
@@ -78,6 +80,9 @@ class ContextPacket:
                          + json.dumps(self.project, sort_keys=True, ensure_ascii=False))
         if self.facts:
             parts.append("CONTEXT user-approved memory facts (JSON):\n" + json.dumps(self.facts, sort_keys=True))
+        if self.calculations:
+            parts.append("CONTEXT [calc:storage] deterministic calculator output (JSON):\n"
+                         + json.dumps(self.calculations, sort_keys=True))
         if self.omitted:
             parts.append("OMITTED from this request: " + "; ".join(self.omitted))
         return "\n\n".join(parts)
@@ -209,9 +214,17 @@ def build_context(listing: dict, observation: dict | None, evidence: list[dict],
             omitted.append(f"{len(history) - HISTORY_LIMIT} older conversation turns")
 
     texts = [description or "", *(e["content"] for e in chosen_evidence)]
+    calculations = None
+    bundle = detect_drive_bundle(" ".join(filter(None, [listing.get("title"), *texts])))
+    if bundle:
+        calculations = {"ref": "calc:storage", "bundle": bundle,
+                        "layouts": [{k: c[k] for k in ("layout", "usable_tb", "usable_tib", "fault_tolerance")}
+                                    for c in bundle_capacities(bundle)]}
+        sources.append({"ref": "calc:storage", "kind": "calculation", "label": "Storage calculator",
+                        "captured_at": None})
     return ContextPacket(PROMPT_VERSION, core, chosen_evidence, chosen_history, question, sources, omitted,
                          sorted(excluded_set), injection_suspected=any(INJECTION.search(t) for t in texts),
-                         project=project, facts=chosen_facts)
+                         project=project, facts=chosen_facts, calculations=calculations)
 
 
 def _money(listing):
@@ -277,6 +290,14 @@ def fixture_reply(packet: ContextPacket) -> str:
         ref = next(e["ref"] for e in reversed(seller) if _hours(e["content"]) is not None)
         lines.append(f"- The seller reports about {hours:,.0f} power-on hours [{ref}]. That is a {risk} usage level. "
                      "Hours alone do not predict failure; SMART reallocated and pending sector counts matter more.")
+    if packet.calculations:
+        bundle = packet.calculations["bundle"]
+        lines.append(f"- The text states {bundle['count']} × {bundle['size_tb']} TB drives (\"{bundle['matched']}\"). "
+                     "Calculated usable capacity before filesystem overhead [calc:storage]: "
+                     + "; ".join(f"{c['layout']} {c['usable_tb']} TB ({c['usable_tib']} TiB)" for c in packet.calculations["layouts"])
+                     + ". Confirm the drive models and health before relying on this.")
+    elif any(word in normalize(corpus).split() for word in ("bay", "enclosure", "nas")):
+        lines.append("- No drives are stated as included, so I'm assuming the enclosure comes empty.")
     question = normalize(packet.question)
     if any(word in question.split() for word in ("price", "offer", "worth", "deal", "cheap", "expensive")):
         lines.append("- I have no verified market comparables in this conversation, so I can't say whether the price is "

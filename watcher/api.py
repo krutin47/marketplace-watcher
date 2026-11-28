@@ -27,6 +27,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .assistant import PROMPT_VERSION, TERMINAL, AssistantRunner, FixtureAssistantProvider, capabilities_dict
 from .errors import ApiError
 from .purchasing import register as register_purchasing
+from .calculations import register as register_calculations
+from .comparisons import register as register_comparisons
 from .core import Contract, ListingCandidate, ListingInput, Short, Source, Watchlist, seller_draft
 from .providers import ConsoleNotifier, SOURCES, TelegramNotifier
 from .store import Store, utc
@@ -646,6 +648,8 @@ def create_app(store=None, *, background=True, alert_secret=None, notifier=None,
                 "note": "Usage is recorded per run. The fixture assistant has no cost. No cloud provider is configured."}
 
     register_purchasing(app, store, clock)
+    register_calculations(app)
+    register_comparisons(app, store, clock)
 
     @app.get("/health/live")
     async def live():

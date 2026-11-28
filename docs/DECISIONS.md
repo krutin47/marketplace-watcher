@@ -21,6 +21,8 @@ date, owner, rationale, alternatives, impact and rollback. Implementation status
 | ADR-12 | Assistant replies rendered as plain text, not markdown | Accepted | 2026-11-28 |
 | ADR-13 | Retention pruning keeps the latest observation per listing | Accepted | 2026-11-28 |
 | ADR-14 | Purchasing records stored as typed columns plus a versioned JSON `attributes` column | Accepted | 2026-11-28 |
+| ADR-15 | Comparisons evaluate only derivable hard requirements; no weighted project score yet | Accepted | 2026-11-28 |
+| ADR-16 | GitHub Actions CI with read-only permissions; browser tests stay manual | Accepted | 2026-11-28 |
 
 ## ADR-02 — Keep the Python stack (deviation from the handbook default)
 
@@ -92,6 +94,23 @@ revision. Context snapshots reference observation IDs, so pruning now keeps the 
 Projects, requirements and inventory store queried fields as columns, and category-specific detail in a JSON
 `attributes` column with `attributes_schema` version (handbook INV-06). Optimistic concurrency uses an
 app-managed `version` integer; stale updates return 409.
+
+## ADR-15 — Narrow, honest requirement evaluation in comparisons
+
+- **Decision.** `comparison/1` evaluates a hard requirement only when the value is derivable from stored data:
+  usable capacity from an explicitly stated drive bundle (via the calculator, best-redundancy layout first) and asking
+  price in the same currency. Everything else is reported as `unknown` with a reason. Outcomes are
+  `blocked by a hard requirement`, `needs evidence`, `candidate` or `no hard requirements set`, never "buy".
+- **Rationale.** Handbook SCORE-01/02 forbid treating missing evidence as a pass and require hard constraints to
+  dominate price. A weighted 0–100 project score without evidence for most components would mostly show "insufficient
+  evidence", so it is deferred until structured spec extraction (RES-02) exists.
+- **Rollback.** Snapshots record `algorithm_version`; a future `comparison/2` can coexist with old snapshots.
+
+## ADR-16 — Continuous integration
+
+GitHub Actions runs compile, unit/integration tests, JS syntax checks and `docker compose config` with
+`permissions: contents: read`. Browser tests need a running server and Playwright, so they stay manual and are
+recorded in the status document. No deployment step exists.
 
 ## Open decisions (owner input required)
 
